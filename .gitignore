@@ -8,7 +8,7 @@ __pycache__/
 .direnv/**
 #.tmuxp.yaml
 .python-version
-devenv.lock
+#devenv.lock
 uv.lock
 .devenv.flake.nix
 
