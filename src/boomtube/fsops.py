@@ -15,13 +15,6 @@ def ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def is_symlink(path: Path) -> bool:
-    try:
-        return path.is_symlink()
-    except OSError:
-        return False
-
-
 def readlink_abs(link: Path) -> Path:
     """Read a symlink and return an absolute path (best effort)."""
     raw = link.readlink()
@@ -109,11 +102,6 @@ def rename_aside(path: Path) -> Path:
     return staging
 
 
-def symlink_to(link: Path, target: Path) -> None:
-    ensure_parent_dir(link)
-    link.symlink_to(target)
-
-
 def remove_path(path: Path) -> None:
     """Remove a file/dir/symlink at `path` without following inner symlinks."""
     if path.is_symlink() or path.is_file():
@@ -122,5 +110,5 @@ def remove_path(path: Path) -> None:
     if path.is_dir():
         shutil.rmtree(path)
         return
-    # For other special cases, attempt unlink.
+    # For other special cases (e.g. FIFOs/sockets), attempt unlink.
     path.unlink(missing_ok=True)

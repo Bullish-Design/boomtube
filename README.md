@@ -405,7 +405,18 @@ Contributions are welcome. Please ensure:
 
 ## Version History
 
-### 0.1.0 (Current)
+### 0.2.0 (Current)
+
+Major safety and usability release:
+- **Validate → plan → verify → swap pipeline**: geometry and templates are validated before any filesystem mutation; unsafe configs fail with exit 2 and zero changes
+- **One-directional migration** (link → target only); both-populated content is refused unless `--force` (target preserved as deterministic conflict files)
+- **Size-verified copies and atomic swap**: deletion only after verified duplication; crash-safe replacement
+- **Typed per-link errors** with continue-on-error and exit code 5
+- **`boomtube config` command**: prints the fully resolved plan without changing anything
+- **Documented exit codes** 0/2/3/4/5
+- typer floor raised to `>=0.15.4` (validated against 0.15.4/0.16.0/0.27.1)
+
+### 0.1.0
 
 Initial MVP release with:
 - YAML configuration

@@ -64,6 +64,36 @@ def test_reclaim_staging_residue_removes_stale_tree(tmp_path: Path):
     assert not stale.exists()
 
 
+def test_reclaim_staging_residue_survives_remove_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A failing remove during reclaim is logged, never raised."""
+    stale = tmp_path / "data.bt-staging-999"
+    stale.mkdir()
+
+    def boom(path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(fsops, "remove_path", boom)
+    fsops.reclaim_staging_residue(tmp_path / "data")  # must not raise
+    assert stale.exists()
+
+
+def test_readlink_abs_resolves_relative_target(tmp_path: Path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "ln"
+    link.symlink_to("real")  # relative symlink target
+    assert fsops.readlink_abs(link) == real.resolve(strict=False)
+
+
+def test_remove_path_handles_special_files(tmp_path: Path):
+    import os
+
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    fsops.remove_path(fifo)
+    assert not fifo.exists()
+
+
 def test_crash_after_rename_leaves_staging_and_reruns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """I6 crash window: symlink install fails -> staging residue, data intact, rerunable."""
     import boomtube.apply as apply_mod

@@ -223,3 +223,42 @@ links:
     )
     with pytest.raises(ConfigError):
         load_config(cfg)
+
+
+def test_missing_config_file_is_config_error(tmp_path: Path):
+    with pytest.raises(ConfigError, match="Config not found"):
+        load_config(tmp_path / "nope.yaml")
+
+
+def test_unreadable_config_path_is_config_error(tmp_path: Path):
+    """Reading a directory raises OSError -> wrapped as ConfigError."""
+    with pytest.raises(ConfigError, match="Unable to read config"):
+        load_config(tmp_path)
+
+
+def test_invalid_yaml_is_config_error(tmp_path: Path):
+    cfg = write(tmp_path / "boomtube.yaml", "version: [unclosed")
+    with pytest.raises(ConfigError, match="YAML parse error"):
+        load_config(cfg)
+
+
+def test_raw_valueerror_from_model_is_wrapped(tmp_path: Path, monkeypatch):
+    """A non-ValidationError ValueError escaping model_validate is still wrapped."""
+    import boomtube.config as config_mod
+
+    cfg = write(
+        tmp_path / "boomtube.yaml",
+        """
+version: 1
+links:
+  - link: ".notes"
+    target: "/x"
+""",
+    )
+
+    def boom(data):
+        raise ValueError("raw boom")
+
+    monkeypatch.setattr(config_mod.BoomtubeConfig, "model_validate", staticmethod(boom))
+    with pytest.raises(ConfigError, match="raw boom"):
+        load_config(cfg)
