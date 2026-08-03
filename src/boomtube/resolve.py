@@ -8,10 +8,11 @@ class VarResolutionError(RuntimeError):
     pass
 
 
-def render(template: str, ctx: Mapping[str, str]) -> str:
+def render_template(template: str, ctx: Mapping[str, str]) -> str:
     """Render a string template using `{var}` placeholders.
 
-    Raises VarResolutionError on missing keys.
+    Normalizes the full set of template failure modes (missing keys, stray
+    braces, positional fields) into a typed `VarResolutionError`.
     """
     try:
         # `format_map` accepts any Mapping. Avoid converting to dict (which would
@@ -19,6 +20,16 @@ def render(template: str, ctx: Mapping[str, str]) -> str:
         return template.format_map(ctx)
     except KeyError as e:
         raise VarResolutionError(f"Missing variable: {e.args[0]}") from e
+    except (ValueError, IndexError) as e:
+        raise VarResolutionError(f"Invalid template {template!r}: {e}") from e
+
+
+def render(template: str, ctx: Mapping[str, str]) -> str:
+    """Render a string template using `{var}` placeholders.
+
+    Raises VarResolutionError on missing keys.
+    """
+    return render_template(template, ctx)
 
 
 def build_context(project_root: Path, user_vars: dict[str, str] | None) -> dict[str, str]:
@@ -28,7 +39,10 @@ def build_context(project_root: Path, user_vars: dict[str, str] | None) -> dict[
     }
     user_vars = user_vars or {}
     resolved_user = resolve_vars(user_vars, builtins)
-    return {**builtins, **resolved_user}
+    # Builtins win: even if a user var shares a name, `{project_root}` must
+    # always resolve to the real project root (I4). Config validation rejects
+    # such vars (F16); this merge order is defense in depth.
+    return {**resolved_user, **builtins}
 
 
 def resolve_vars(vars_dict: dict[str, str], builtins: dict[str, str], *, recursion_limit: int = 50) -> dict[str, str]:
@@ -70,13 +84,12 @@ def resolve_vars(vars_dict: dict[str, str], builtins: dict[str, str], *, recursi
                 return len(set(builtins) | set(vars_dict) | set(resolved))
 
         try:
-            value = vars_dict[key]
-            out = value.format_map(_Ctx())
-        except KeyError as e:
+            out = render_template(vars_dict[key], _Ctx())
+        except VarResolutionError as e:
+            raise VarResolutionError(f"{e} (while resolving '{key}')") from e
+        finally:
             visiting.remove(key)
-            raise VarResolutionError(f"Missing variable: {e.args[0]} (while resolving '{key}')") from e
 
-        visiting.remove(key)
         resolved[key] = out
         return out
 

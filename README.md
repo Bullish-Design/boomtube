@@ -190,6 +190,8 @@ boomtube apply --config custom.yaml
 boomtube apply --verbose
 ```
 
+> Concurrent `boomtube apply` runs against the same project are not supported.
+
 #### config
 
 Display resolved configuration:

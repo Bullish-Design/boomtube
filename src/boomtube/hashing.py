@@ -13,12 +13,20 @@ def sha256(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
 
 
 def files_identical(a: Path, b: Path) -> bool:
-    """Return True if files have identical content."""
+    """Return True if files have identical content.
+
+    TOCTOU-tolerant: any file vanishing between stat and read yields False
+    rather than an unhandled FileNotFoundError (F11).
+    """
     try:
-        sa = a.stat()
-        sb = b.stat()
+        return _files_identical(a, b)
     except FileNotFoundError:
         return False
+
+
+def _files_identical(a: Path, b: Path) -> bool:
+    sa = a.stat()
+    sb = b.stat()
     if sa.st_size != sb.st_size:
         return False
     return sha256(a) == sha256(b)

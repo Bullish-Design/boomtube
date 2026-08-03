@@ -5,11 +5,22 @@ from pathlib import Path
 
 import typer
 
-from .apply import apply_all
+from .apply import apply_plan
 from .config import ConfigError, load_config
+from .planning import PlanError, build_plan
 from .resolve import VarResolutionError, build_context
 
-app = typer.Typer(add_completion=False, help="Boomtube: project-local symlink manager (MVP)")
+app = typer.Typer(
+    add_completion=False, no_args_is_help=True, help="Boomtube: project-local symlink manager (MVP)"
+)
+
+
+@app.callback()
+def _main() -> None:
+    """Boomtube: project-local symlink manager.
+
+    Use `boomtube apply` to create/update symlinks from boomtube.yaml.
+    """
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -17,13 +28,16 @@ def _configure_logging(verbose: bool) -> None:
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
 
-@app.command()
+@app.command(name="apply")
 def apply(
     project_root: Path = typer.Option(
         Path.cwd(), "--project-root", help="Project root directory (defaults to cwd)"
     ),
     config: Path | None = typer.Option(None, "--config", help="Path to boomtube.yaml"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging"),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Override migrate:false / both-populated refusals by replacing target content"
+    ),
 ) -> None:
     """Apply symlink config (create/replace symlinks, optionally migrate)."""
     _configure_logging(verbose)
@@ -38,8 +52,16 @@ def apply(
 
         cfg = load_config(config_path)
         ctx = build_context(project_root_resolved, cfg.vars)
-        apply_all(project_root_resolved, cfg.links, ctx)
-    except (ConfigError, VarResolutionError) as e:
+        planned = build_plan(project_root_resolved, cfg, ctx)
+        result = apply_plan(project_root_resolved, planned, force=force)
+        if result.failed:
+            for path, exc in result.failed:
+                logging.error("failed to apply link at %s: %s", path, exc)
+            logging.error(
+                "applied %d/%d links", len(result.applied), len(result.applied) + len(result.failed)
+            )
+            raise typer.Exit(code=5)
+    except (ConfigError, VarResolutionError, PlanError) as e:
         logging.error(str(e))
         raise typer.Exit(code=2)
     except PermissionError as e:

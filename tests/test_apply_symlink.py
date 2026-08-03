@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from boomtube.apply import apply_all
+from boomtube.migrate import MigrateCollisionError
 from boomtube.models import LinkSpec
 
 
@@ -58,6 +59,7 @@ def test_replace_wrong_symlink(tmp_path: Path):
 
 
 def test_target_is_never_deleted_on_replace(tmp_path: Path):
+    """D2: real content on both sides is a refusal; nothing is deleted or changed."""
     project = tmp_path / "proj"
     project.mkdir()
     target = tmp_path / "ext" / "notes"
@@ -72,7 +74,38 @@ def test_target_is_never_deleted_on_replace(tmp_path: Path):
     spec = LinkSpec(link=".notes", target=str(target), kind="dir", migrate=True)
     ctx = {"project_root": str(project), "project_name": project.name}
 
-    apply_all(project, [spec], ctx)
+    result = apply_all(project, [spec], ctx)
 
+    assert len(result.failed) == 1
+    assert isinstance(result.failed[0][1], MigrateCollisionError)
+    # nothing mutated: link tree and target both intact, no symlink created
+    assert (link_dir / "a.txt").read_text(encoding="utf-8") == "a"
     assert (target / "keep.txt").read_text(encoding="utf-8") == "hi"
+    assert not (project / ".notes").is_symlink()
+
+
+def test_both_populated_force_preserves_target_as_conflict(tmp_path: Path):
+    """D2 --force: target content is preserved as a conflict file, then link seeds."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    target = tmp_path / "ext" / "notes"
+    target.mkdir(parents=True)
+    (target / "keep.txt").write_text("hi", encoding="utf-8")
+
+    link_dir = project / ".notes"
+    link_dir.mkdir()
+    (link_dir / "a.txt").write_text("a", encoding="utf-8")
+
+    spec = LinkSpec(link=".notes", target=str(target), kind="dir", migrate=True)
+    ctx = {"project_root": str(project), "project_name": project.name}
+
+    result = apply_all(project, [spec], ctx, force=True)
+
+    assert result.failed == []
     assert (project / ".notes").is_symlink()
+    # link content is authoritative at the target; old target content preserved
+    assert (target / "a.txt").read_text(encoding="utf-8") == "a"
+    conflicts = list(target.glob("keep.txt.conflict-from-project-*"))
+    assert len(conflicts) == 1
+    assert conflicts[0].read_text(encoding="utf-8") == "hi"
+    assert (project / ".notes" / "a.txt").read_text(encoding="utf-8") == "a"
