@@ -255,3 +255,29 @@ def test_apply_all_rejects_dotdot_link_before_mutation(tmp_path: Path):
     with pytest.raises(ValidationError):
         LinkSpec(link="../outside", target=str(root / "ext" / "mirror"), kind="dir", migrate=True)
     assert tree_snapshot(root) == before
+
+
+def test_apply_time_recheck_catches_symlink_parent_created_mid_run(tmp_path: Path):
+    """I2: a parent that becomes a symlink through an earlier link in the same run is
+    caught at apply time as a per-link error; nothing escapes the project root."""
+    from boomtube.apply import apply_all
+
+    root = tmp_path
+    proj = root / "proj"
+    proj.mkdir()
+    outside = root / "outside"
+    outside.mkdir()
+    (outside / "precious.txt").write_text("keep", encoding="utf-8")
+
+    specs = [
+        LinkSpec(link="a", target=str(outside), kind="dir", migrate=False),
+        LinkSpec(link="a/b", target=str(root / "t2"), kind="dir", migrate=False),
+    ]
+    result = apply_all(proj, specs, ctx_for(proj))
+    assert len(result.applied) == 1
+    assert len(result.failed) == 1
+    assert isinstance(result.failed[0][1], PlanError)
+    # nothing was created outside the project
+    assert (proj / "a").is_symlink()
+    assert not (outside / "b").exists()
+    assert (outside / "precious.txt").read_text(encoding="utf-8") == "keep"

@@ -11,8 +11,8 @@ from .fsops import (
     normalize_path,
     readlink_abs,
     reclaim_staging_residue,
-    rename_aside,
     remove_path,
+    rename_aside,
     sniff_type,
 )
 from .migrate import (

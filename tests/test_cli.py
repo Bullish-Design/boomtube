@@ -220,3 +220,110 @@ def test_permission_error_maps_to_exit_3(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(cli_mod, "build_plan", boom)
     result = CliRunner().invoke(app, ["apply", "--project-root", str(proj)])
     assert result.exit_code == 3
+
+
+def test_config_command_prints_resolved_plan(tmp_path: Path):
+    """F18: `boomtube config` prints fully rendered targets/vars without mutating anything."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    write(
+        proj / "boomtube.yaml",
+        """
+version: 1
+vars:
+  notes_root: "/tmp/Notes"
+links:
+  - name: Notes
+    link: ".notes"
+    target: "{notes_root}/Projects/{project_name}"
+    kind: dir
+    migrate: true
+""",
+    )
+    result = CliRunner().invoke(app, ["config", "--project-root", str(proj)])
+    assert result.exit_code == 0, result.output
+    assert str(proj.name) in result.output
+    assert f"/tmp/Notes/Projects/{proj.name}" in result.output
+    assert ".notes" in result.output
+    assert result.output.count("project_root:") >= 1
+    # config command must not create the link or the target
+    assert not (proj / ".notes").exists()
+    assert not (tmp_path / "Notes").exists()
+
+
+def test_config_command_invalid_config_exits_2(tmp_path: Path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    write(proj / "boomtube.yaml", "version: 99\nlinks:\n  - link: '.notes'\n    target: '/x'\n")
+    result = CliRunner().invoke(app, ["config", "--project-root", str(proj)])
+    assert result.exit_code == 2
+
+
+def test_config_command_rejects_unsafe_geometry_exits_2(tmp_path: Path):
+    """F18: `boomtube config` runs the same preflight plan validation as apply."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    write(
+        proj / "boomtube.yaml",
+        """
+version: 1
+links:
+  - link: ".notes"
+    target: ".notes/backup"
+    kind: dir
+""",
+    )
+    result = CliRunner().invoke(app, ["config", "--project-root", str(proj)])
+    assert result.exit_code == 2
+
+
+def test_apply_with_explicit_config_flag(tmp_path: Path):
+    """`--config` uses the config file's parent as the project root."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    target = tmp_path / "ext" / "notes"
+    write(
+        sub / "myconfig.yaml",
+        f"""
+version: 1
+links:
+  - link: ".notes"
+    target: "{target}"
+    kind: dir
+""",
+    )
+    result = CliRunner().invoke(app, ["apply", "--config", str(sub / "myconfig.yaml")])
+    assert result.exit_code == 0, result.output
+    assert (sub / ".notes").is_symlink()
+
+
+def test_config_command_oserror_maps_to_exit_4(tmp_path: Path, monkeypatch):
+    """F19: the config command maps an OSError to exit 4."""
+    import boomtube.cli as cli_mod
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    write(proj / "boomtube.yaml", "version: 1\nlinks:\n  - link: '.notes'\n    target: '/x'\n")
+
+    def boom(root, cfg, ctx):
+        raise OSError("simulated I/O failure")
+
+    monkeypatch.setattr(cli_mod, "build_plan", boom)
+    result = CliRunner().invoke(app, ["config", "--project-root", str(proj)])
+    assert result.exit_code == 4
+
+
+def test_config_command_permission_error_maps_to_exit_3(tmp_path: Path, monkeypatch):
+    """F19: the config command maps a PermissionError to exit 3."""
+    import boomtube.cli as cli_mod
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    write(proj / "boomtube.yaml", "version: 1\nlinks:\n  - link: '.notes'\n    target: '/x'\n")
+
+    def boom(root, cfg, ctx):
+        raise PermissionError("simulated permission failure")
+
+    monkeypatch.setattr(cli_mod, "build_plan", boom)
+    result = CliRunner().invoke(app, ["config", "--project-root", str(proj)])
+    assert result.exit_code == 3

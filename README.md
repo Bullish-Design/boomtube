@@ -6,7 +6,7 @@ Project-local symlink manager with safe migration
 
 ## Overview
 
-Boomtube manages symlinks within your project directories using a declarative YAML configuration. It safely migrates existing files and directories when creating new symlinks, ensuring no data loss through intelligent conflict resolution.
+Boomtube manages symlinks within your project directories using a declarative YAML configuration. It safely migrates existing files and directories when creating new symlinks, ensuring no data loss through validated, verified, atomic operations.
 
 ## Features
 
@@ -14,19 +14,21 @@ Boomtube manages symlinks within your project directories using a declarative YA
 
 - **Declarative Configuration**: Define all project symlinks in a single `boomtube.yaml` file
 - **Safe Migration**: Automatically migrate existing files/directories before creating symlinks
-- **Conflict Resolution**: Preserves both versions when files differ and have identical modification times
+- **One-Directional Migration**: Migration copies **link → target only**; the target is never copied back into the project. At steady state the symlink is the single source of truth
+- **Conflict Protection**: If both the link path and the target hold real content, `apply` refuses (exit 5) unless you pass `--force`, which preserves the target side as conflict files
 - **Variable Interpolation**: Use variables in target paths with built-in and custom variables
 - **Automatic Kind Detection**: Intelligently detects whether to create file or directory symlinks
 - **Idempotent Operations**: Safe to run multiple times without side effects
 
 ### Migration Strategy
 
-Boomtube uses a content-aware migration strategy:
+Boomtube uses a validated, verified migration strategy:
 
-- **Modification Time Priority**: Newer files automatically overwrite older ones
-- **Content Hashing**: Uses SHA-256 to detect identical content regardless of timestamps
-- **Conflict Preservation**: Creates `.conflict-from-project-*` files when automatic resolution isn't possible
-- **Bidirectional Sync**: Merges content from both source and target locations
+- **Preflight validation**: every target is rendered and every path checked *before anything is touched*; unsafe configs are rejected with exit 2 and zero filesystem changes
+- **One-way seed**: existing content at the link path is copied to the target (never the reverse)
+- **Verified copies**: every copy is size-verified before its source can be removed
+- **Content Hashing**: SHA-256 detects identical content to avoid redundant copies and to name conflict files deterministically
+- **Conflict Preservation**: `--force` moves the target side aside as `.conflict-from-project-*` files (deterministic names), then seeds from the link side
 
 ## Installation
 
@@ -83,10 +85,11 @@ boomtube apply
 ```
 
 This will:
+- Validate the whole configuration first (geometry, templates) — unsafe configs fail with exit 2 and nothing is changed
 - Create target directories if they don't exist
-- Migrate existing files/directories from link locations to targets
-- Create symlinks from link paths to targets
-- Report any conflicts that require manual resolution
+- Migrate existing files/directories from link locations to targets (link → target only)
+- Create symlinks from link paths to targets atomically
+- Report any per-link failures and exit 5
 
 ### 3. Verify Configuration
 
@@ -94,14 +97,14 @@ This will:
 boomtube config
 ```
 
-This displays the resolved configuration with all variables interpolated.
+This validates the config and prints the fully resolved plan (all variables and targets interpolated) without changing anything.
 
 ## Configuration
 
 ### Configuration File Structure
 
 ```yaml
-version: 1  # Required, must be 1
+version: 1  # Required, must be the integer 1 (`version: yes` is rejected)
 
 vars:
   # Optional: custom variables for use in target paths
@@ -110,16 +113,18 @@ vars:
 
 links:
   - name: "Human-readable name"        # Optional
-    link: "relative/path/in/project"   # Required, must be relative
+    link: "relative/path/in/project"   # Required, must be relative and inside the project
     target: "~/absolute/or/relative"   # Required, supports ~ and variables
     kind: "auto"                       # Optional: auto|file|dir (default: auto)
-    migrate: true                      # Optional: enable migration (default: false)
+    migrate: true                      # Optional: enable migration (default: true)
 ```
 
 ### Built-in Variables
 
 - `{project_root}`: Absolute path to the project root directory
 - `{project_name}`: Name of the project root directory
+
+`project_root` and `project_name` are built-ins and **cannot be overridden** by user variables; a config that defines them as user vars is rejected.
 
 ### Link Specification Fields
 
@@ -129,15 +134,17 @@ Human-readable identifier for logging and display purposes.
 
 #### link (required)
 
-Relative path within the project where the symlink will be created. Must not be absolute.
+Relative path within the project where the symlink will be created. Must not be absolute, must not start with `~`, must not be empty, and must not be `.`, `..`, or contain any `..` component (a link like `../outside` or `a/../../b` would escape the project root and is rejected). It must never resolve to the project root itself.
 
 #### target (required)
 
-Destination path for the symlink. Can be:
+Destination path for the symlink. Must be non-empty. Can be:
 - Absolute path: `/home/user/data`
 - Home-relative path: `~/Documents`
 - Relative path: `../shared` (resolved relative to project root)
 - Variable-interpolated: `{notes_root}/{project_name}`
+
+The target must not be the project root, and must not contain or be contained by its link (nested link/target trees are rejected).
 
 #### kind (optional)
 
@@ -153,13 +160,16 @@ Explicitly specify symlink type:
 4. Heuristic: dot-prefixed names without extensions are directories (e.g., `.notes` → dir)
 5. Default to file
 
+A `kind` that contradicts the real file/dir type at the link path (e.g. `kind: file` on a real directory) is a per-link error (exit 5), not a crash.
+
 #### migrate (optional)
 
-Enable safe migration when `true` (default: `false`). When enabled:
-- Existing content at link location is merged with target location
-- Newer files overwrite older files
-- Identical files are detected via content hashing
-- Conflicts are preserved as separate files
+Enable safe migration when `true` (default: `true`). When enabled:
+- Existing content at the link location is copied to the target (link → target only)
+- Copies are size-verified before the source is removed
+- Conflicts (both sides populated) are refused unless `--force`
+
+When `migrate: false` and the link path already contains real files or directories, `boomtube apply` refuses and exits 5 — pass `--force` to replace without migrating. (Empty directories at the link path are replaced silently.)
 
 ## Usage
 
@@ -176,6 +186,7 @@ boomtube apply [OPTIONS]
 **Options:**
 - `--config FILE`: Specify config file (default: `boomtube.yaml`)
 - `--verbose`: Enable debug logging
+- `--force`, `-f`: Override `migrate: false` / both-populated refusals (replaces the target side, preserving it as conflict files)
 
 **Examples:**
 
@@ -188,13 +199,16 @@ boomtube apply --config custom.yaml
 
 # Apply with verbose output
 boomtube apply --verbose
+
+# Force a migration despite existing target content (preserved as conflict files)
+boomtube apply --force
 ```
 
 > Concurrent `boomtube apply` runs against the same project are not supported.
 
 #### config
 
-Display resolved configuration:
+Display the fully resolved configuration:
 
 ```bash
 boomtube config [OPTIONS]
@@ -203,49 +217,65 @@ boomtube config [OPTIONS]
 **Options:**
 - `--config FILE`: Specify config file (default: `boomtube.yaml`)
 
-Shows the configuration with all variables resolved and validated.
+Validates the config and prints the fully resolved plan (all variables and targets interpolated) without changing anything.
 
 ### Exit Codes
 
 - `0`: Success
-- `1`: Configuration error, resolution error, or other failure
+- `2`: Config/validation/var-resolution error (nothing was changed)
+- `3`: Permission error
+- `4`: I/O error
+- `5`: One or more links failed to apply (others may have succeeded)
+
+## Safety guarantees
+
+Boomtube rejects, before touching the filesystem, any config that is a data-loss hazard by construction:
+
+- `link` resolving outside the project root (`../`, symlinked parents, `.`)
+- `link` resolving to the project root itself
+- empty/`.` target, or a target that renders empty
+- target resolving to the project root
+- link and target overlapping (one inside the other)
+
+Additional guarantees during `apply`:
+
+- Geometry is re-verified for each link against the live filesystem immediately before mutation
+- Every copy is **size-verified** before its source can be deleted
+- Every file in the pre-seed snapshot of the link tree must have a verified copy in the target before the swap proceeds
+- The swap is atomic: the old path is moved aside, the symlink installed, then the old tree removed — a crash at any point leaves data recoverable (in the target or in a `.bt-staging-*` tree that a re-run reclaims)
+- `migrate: false` never deletes non-empty real content without an explicit `--force`
+- `remove_path` is never called on the project root or its ancestors
 
 ## Migration Behavior
 
 ### Directory Migration
 
-When migrating directories:
+When migrating directories (one-directional, link → target):
 
-1. **Recursively traverse** both source and target directories
-2. **Skip symlinks** within directories (not followed)
-3. **For each file path:**
-   - If only in source → copy to target
-   - If only in target → copy to source
-   - If in both with identical content → skip
-   - If in both with different mtimes → copy newer to location of older
-   - If in both with same mtime but different content → create conflict file
+1. **Pre-scan** the link tree (lstat, rel → type) and compare against the target
+2. A dir-vs-file type collision at the same relative path is a per-link error **before any copy** — no partial state
+3. **If both the link and target hold real content**, migration refuses (`MigrateCollisionError`, exit 5) unless `--force`, which moves the target's content aside as conflict files first
+4. Files are copied link → target, **size-verified** per copy
+5. Symlinks and special files inside the trees are skipped, never followed
+6. Files that disappear mid-migration are skipped (no crash)
 
 ### File Migration
 
-When migrating individual files:
+When migrating individual files (one-directional, link → target):
 
-1. **If only source exists** → copy to target location
-2. **If only target exists** → copy to source location
-3. **If both exist:**
-   - Compare content hashes
-   - If identical → skip
-   - If different mtimes → copy newer file to other location
-   - If same mtime → create conflict file at target location
+1. If only the link exists → copied to the target
+2. If both exist → refused unless `--force` (target preserved as a conflict file)
+3. Never writes through a symlink on either side
 
 ### Conflict Files
 
-When automatic resolution isn't possible (same mtime, different content), Boomtube creates a conflict file:
+When automatic resolution isn't possible (both sides populated with `--force`), Boomtube preserves the target side as conflict files:
 
-**Format:** `{original_name}.conflict-from-project-{timestamp}`
+**Format:** `{original_name}.conflict-from-project-{sha256-of-content (8 chars)}`
 
-**Example:** `.env.local.conflict-from-project-20250207-160305`
+**Example:** `.env.local.conflict-from-project-1a2b3c4d`
 
-The original file remains unchanged at the target location. The conflicting version from the project is saved with the conflict suffix.
+Conflict files are excluded from future migrations and named deterministically by content, so re-running an apply is idempotent with respect to conflicts. The timestamp is preserved in each conflict file's mtime.
 
 ## Development
 
@@ -286,15 +316,16 @@ boomtube/
 ├── src/boomtube/
 │   ├── __init__.py       # Package initialization
 │   ├── __main__.py       # Entry point for python -m boomtube
-│   ├── apply.py          # Symlink application logic
-│   ├── cli.py            # Typer CLI interface
+│   ├── apply.py          # Per-link apply pipeline (validate -> seed -> verify -> swap)
+│   ├── cli.py            # Typer CLI interface (apply, config)
 │   ├── config.py         # Configuration loading and validation
-│   ├── fsops.py          # File system operations
+│   ├── fsops.py          # Atomic filesystem primitives + type sniffing
 │   ├── hashing.py        # Content hashing utilities
-│   ├── migrate.py        # File/directory migration logic
-│   ├── models.py         # Pydantic data models
+│   ├── migrate.py        # One-directional seed (link -> target) + collision handling
+│   ├── models.py         # Pydantic data models (static, context-free validation)
+│   ├── planning.py       # Preflight plan: render targets, geometry validation
 │   ├── resolve.py        # Variable resolution
-│   └── util.py           # Utility functions
+│   └── util.py           # Utility functions (conflict naming, unique paths)
 ├── tests/                # Test suite
 ├── pyproject.toml        # Project metadata and dependencies
 └── boomtube.yaml         # Configuration file (user-created)
@@ -326,36 +357,38 @@ pytest tests/test_config.py
 The test suite covers:
 - Configuration loading and validation
 - Variable resolution with builtin and custom variables
-- Kind auto-detection
-- File and directory migration
-- Conflict resolution
-- Symlink application and replacement
+- Geometry validation (containment, overlap, root safety)
+- Kind auto-detection and consistency
+- One-directional file and directory seeding
+- Conflict detection, naming, and idempotency
+- Symlink application, verification, and atomic swap crash windows
 
 ## Architecture Notes
 
 ### Design Principles
 
 - **Pydantic Models**: All configuration and data structures use Pydantic for validation
-- **Functional Core**: Pure functions for migration logic and resolution
-- **Explicit over Implicit**: Clear, verbose error messages
-- **Safety First**: Never delete data without migration or explicit user action
+- **Validate → Plan → Verify → Swap**: nothing is mutated until the whole plan is validated; every copy is verified before deletion; replacement is atomic
+- **Explicit over Implicit**: clear, actionable error messages; refusals instead of silent merges
+- **Safety First**: Never delete data without a verified copy and an explicit, safe operation
 
 ### Key Algorithms
 
 **Variable Resolution:**
-- Topological sort to resolve dependencies between variables
-- Cycle detection to prevent infinite loops
-- Built-in variables injected before user variables
+- Dependency-ordered resolution with cycle detection (DFS memoization)
+- `project_root`/`project_name` are built-in and cannot be overridden by user vars
+- All templates are rendered during preflight, before any filesystem mutation
 
 **Migration Logic:**
-- Content-based comparison using SHA-256 hashing
-- mtime-based freshness determination
-- Conflict files preserve all versions when automatic merge fails
+- One-directional seed (link → target); both-populated is refused unless `--force`
+- Pre-scan for type collisions before any copy
+- Size-verified copies; vanished files skipped
+- Deterministic conflict files named by content hash, excluded from future seeds
 
 **Symlink Management:**
-- Normalization to absolute paths for comparison
-- Safe removal and recreation of stale symlinks
-- Parent directory creation as needed
+- Geometry validated at preflight and re-verified per link at apply time
+- Atomic symlink creation/replacement (temp symlink + `os.replace`)
+- Crash-safe swap: old tree moved aside, symlink installed, old tree deleted
 
 ## License
 

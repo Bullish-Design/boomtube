@@ -8,6 +8,9 @@ authors = [{name = "Boomtube contributors"}]
 license = {text = "MIT"}
 dependencies = [
   "pydantic>=2.10",
+  # The CLI uses a root callback + named subcommands (typer >=0.12, current 0.27.x).
+  # This structure is version-independent across the supported range; verify with:
+  #   uv run --with "typer==0.12" -- python -m boomtube apply --help
   "typer>=0.12",
   "PyYAML>=6.0",
 ]

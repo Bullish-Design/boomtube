@@ -10,6 +10,9 @@ from boomtube.apply import (
     MigrateDisabledError,
     UnsupportedLinkTypeError,
     _is_root_or_ancestor,
+    _same_target,
+    _swap,
+    _verify_snapshot_copied,
     apply_all,
 )
 from boomtube.migrate import CopyVerificationError
@@ -160,3 +163,76 @@ def test_root_rmtree_guard(tmp_path: Path):
     assert _is_root_or_ancestor(root, proj)  # ancestor of the project
     assert not _is_root_or_ancestor(proj / "sub", proj)  # descendant
     assert not _is_root_or_ancestor(tmp_path / "other", proj)
+
+
+def test_swap_refuses_project_root(tmp_path: Path):
+    """F4: _swap must never proceed on a path equal to the project root."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    with pytest.raises(RuntimeError):
+        _swap(proj, proj, tmp_path / "target", "x")
+    assert (tmp_path / "proj").is_dir()
+
+
+def test_migrate_file_link_seeds_and_swaps(tmp_path: Path):
+    """migrate:true with a real FILE at the link path seeds link->target and swaps."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / ".env").write_text("KEY=val", encoding="utf-8")
+    target = tmp_path / "ext" / "env"
+    spec = LinkSpec(link=".env", target=str(target), kind="file", migrate=True)
+    result = apply_all(project, [spec], ctx_for(project))
+    assert result.failed == []
+    assert (project / ".env").is_symlink()
+    assert target.read_text(encoding="utf-8") == "KEY=val"
+
+
+def test_missing_file_link_creates_parent_only(tmp_path: Path):
+    """A missing file-kind link creates its target's parent dir (not the file)."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    spec = LinkSpec(link=".env", target=str(tmp_path / "ext" / "dir" / "env"), kind="file", migrate=True)
+    result = apply_all(project, [spec], ctx_for(project))
+    assert result.failed == []
+    assert (project / ".env").is_symlink()
+    assert (tmp_path / "ext" / "dir").is_dir()
+    assert not (tmp_path / "ext" / "dir" / "env").exists()  # dangling by design
+
+
+def test_same_target_on_non_symlink_is_false(tmp_path: Path):
+    """readlink failure on a non-symlink path yields False (no OSError escapes)."""
+    plain = tmp_path / "plain"
+    plain.write_text("x", encoding="utf-8")
+    assert _same_target(plain, tmp_path / "t") is False
+
+
+def test_verify_snapshot_fails_on_truncated_copy(tmp_path: Path):
+    """I5: the verify pass rejects a size-mismatched target copy."""
+    src = tmp_path / "src.txt"
+    src.write_text("x" * 100, encoding="utf-8")
+    dst = tmp_path / "target"
+    dst.mkdir()
+    (dst / "src.txt").write_text("x" * 10, encoding="utf-8")
+    with pytest.raises(CopyVerificationError):
+        _verify_snapshot_copied({"src.txt": src}, dst, "test")
+
+
+def test_verify_snapshot_fails_on_missing_copy(tmp_path: Path):
+    """I5: the verify pass rejects a missing target copy."""
+    src = tmp_path / "src.txt"
+    src.write_text("x", encoding="utf-8")
+    dst = tmp_path / "target"
+    dst.mkdir()
+    with pytest.raises(CopyVerificationError):
+        _verify_snapshot_copied({"src.txt": src}, dst, "test")
+
+
+def test_verify_snapshot_skips_vanished_sources(tmp_path: Path):
+    """F11: a source that vanished between snapshot and verify is skipped, not an error."""
+    src = tmp_path / "gone.txt"
+    src.write_text("x", encoding="utf-8")
+    dst = tmp_path / "target"
+    dst.mkdir()
+    # vanish the source before verifying
+    src.unlink()
+    _verify_snapshot_copied({"gone.txt": src}, dst, "test")  # no raise

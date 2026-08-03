@@ -241,3 +241,93 @@ def test_copy_refuses_write_through_symlink(tmp_path: Path):
     with pytest.raises(MigrateCollisionError):
         M._copy(src, dst)
     assert real.read_text(encoding="utf-8") == "orig"
+
+
+def test_seed_dir_into_file_target_refused(tmp_path: Path):
+    """F9: a directory link must not seed into a file target."""
+    link = tmp_path / "link"
+    link.mkdir()
+    write(link / "x.txt", "x")
+    target = tmp_path / "target"
+    target.write_text("file", encoding="utf-8")
+    with pytest.raises(MigrateCollisionError):
+        seed_dir(link, target)
+
+
+def test_snapshot_of_missing_path_is_empty(tmp_path: Path):
+    assert snapshot_files(tmp_path / "nope") == {}
+
+
+def test_snapshot_of_symlink_root_is_empty(tmp_path: Path):
+    """F21: a symlinked root is never walked through."""
+    real = tmp_path / "real"
+    real.mkdir()
+    write(real / "x.txt", "x")
+    ln = tmp_path / "ln"
+    ln.symlink_to(real, target_is_directory=True)
+    assert snapshot_files(ln) == {}
+
+
+def test_snapshot_skips_file_symlinks(tmp_path: Path):
+    """File symlinks inside the tree are excluded from snapshots and type maps."""
+    import boomtube.migrate as M
+
+    link = tmp_path / "link"
+    link.mkdir()
+    write(link / "real.txt", "x")
+    real_file = tmp_path / "outside.txt"
+    real_file.write_text("secret", encoding="utf-8")
+    (link / "fileln").symlink_to(real_file)
+
+    snap = snapshot_files(link)
+    assert set(snap) == {"real.txt"}
+    types = M._type_map(link)
+    assert types == {"real.txt": "file"}
+
+
+def test_type_map_skips_conflict_dirs(tmp_path: Path):
+    import boomtube.migrate as M
+
+    link = tmp_path / "link"
+    link.mkdir()
+    (link / "x.conflict-from-project-12345678").mkdir()
+    types = M._type_map(link)
+    assert types == {}
+
+
+def test_has_real_content_classifications(tmp_path: Path):
+    import boomtube.migrate as M
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    assert M.has_real_content(empty_dir) is False
+    filled = tmp_path / "filled"
+    filled.mkdir()
+    write(filled / "a.txt", "x")
+    assert M.has_real_content(filled) is True
+    f = tmp_path / "f"
+    f.write_text("x", encoding="utf-8")
+    assert M.has_real_content(f) is True
+    assert M.has_real_content(tmp_path / "missing") is False
+
+
+def test_seed_dir_file_link_refused(tmp_path: Path):
+    """seed_dir only seeds directory content; a file link is refused."""
+    link = tmp_path / "afile"
+    link.write_text("x", encoding="utf-8")
+    with pytest.raises(MigrateCollisionError):
+        seed_dir(link, tmp_path / "out")
+
+
+def test_seed_dir_target_symlink_refused(tmp_path: Path):
+    """F21: seeding into a symlinked target directory is refused."""
+    link = tmp_path / "link"
+    link.mkdir()
+    write(link / "x.txt", "x")
+    real = tmp_path / "real"
+    real.mkdir()
+    target = tmp_path / "target"
+    target.symlink_to(real, target_is_directory=True)
+    with pytest.raises(MigrateCollisionError):
+        seed_dir(link, target)
+    assert not (real / "x.txt").exists()

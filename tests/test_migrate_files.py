@@ -117,3 +117,94 @@ def test_file_link_into_dir_target_refused(tmp_path: Path):
     target.mkdir()
     with pytest.raises(MigrateCollisionError):
         seed_file(link, target)
+
+
+def test_seed_file_special_link_refused(tmp_path: Path):
+    """F20: a special file at the link side cannot be seeded."""
+    import os
+
+    link = tmp_path / "pipe"
+    os.mkfifo(link)
+    with pytest.raises(MigrateCollisionError):
+        seed_file(link, tmp_path / "out")
+
+
+def test_seed_file_force_identical_is_noop(tmp_path: Path):
+    """D2 --force: identical content on both sides is already seeded (no churn)."""
+    link = tmp_path / "a.txt"
+    target = tmp_path / "b.txt"
+    link.write_text("same", encoding="utf-8")
+    target.write_text("same", encoding="utf-8")
+    stats = seed_file(link, target, force=True)
+    assert stats.identical == 1
+    assert stats.copied_a_to_b == 0
+    assert stats.conflicts == 0
+    assert target.read_text(encoding="utf-8") == "same"
+
+
+def test_seed_file_dir_link_refused(tmp_path: Path):
+    """seed_file only seeds file content; a dir link is refused."""
+    link = tmp_path / "adir"
+    link.mkdir()
+    with pytest.raises(MigrateCollisionError):
+        seed_file(link, tmp_path / "out")
+
+
+def test_seed_file_vanished_link_no_churn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """F11: a link that vanishes mid-seed (--force) does not churn the target."""
+    import boomtube.migrate as M
+
+    link = tmp_path / "a.txt"
+    target = tmp_path / "b.txt"
+    link.write_text("aaa", encoding="utf-8")
+    target.write_text("bbb", encoding="utf-8")
+
+    def vanish_then_false(a, b):
+        if a == link and link.exists():
+            link.unlink()
+        return False
+
+    monkeypatch.setattr(M, "files_identical", vanish_then_false)
+    stats = seed_file(link, target, force=True)
+    assert stats.copied_a_to_b == 0
+    assert target.read_text(encoding="utf-8") == "bbb"  # untouched
+
+
+def test_seed_file_copy_failure_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """F11: a FileNotFoundError during the copy itself is skipped, not raised."""
+    import boomtube.migrate as M
+
+    link = tmp_path / "a.txt"
+    link.write_text("aaa", encoding="utf-8")
+
+    def vanish_copy(src, dst):
+        raise FileNotFoundError(src)
+
+    monkeypatch.setattr(M, "_copy", vanish_copy)
+    stats = seed_file(link, tmp_path / "out.txt")
+    assert stats.copied_a_to_b == 0
+    assert not (tmp_path / "out.txt").exists()
+
+
+def test_move_aside_conflict_vanished_is_noop(tmp_path: Path):
+    """A file that vanishes before it is swept is simply skipped."""
+    import boomtube.migrate as M
+
+    gone = tmp_path / "gone.txt"
+    assert M._move_aside_conflict(gone) is False
+
+
+def test_move_aside_conflict_different_content_gets_suffix(tmp_path: Path):
+    """A same-name conflict file with different content is deduped with a numeric suffix."""
+    import boomtube.migrate as M
+    from boomtube.hashing import sha256
+    from boomtube.util import conflict_name
+
+    f = tmp_path / "f"
+    f.write_text("aaa", encoding="utf-8")
+    existing = tmp_path / conflict_name("f", sha256(f))
+    existing.write_text("zzz", encoding="utf-8")  # different content at the deterministic name
+    assert M._move_aside_conflict(f) is True
+    assert not f.exists()
+    deduped = tmp_path / (existing.name + "-1")
+    assert deduped.read_text(encoding="utf-8") == "aaa"
