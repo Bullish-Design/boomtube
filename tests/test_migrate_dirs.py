@@ -184,3 +184,60 @@ def test_broken_symlink_at_link_root_is_skipped(tmp_path: Path):
     stats = seed_dir(link, target)
     assert stats.copied_a_to_b == 0
     assert not (tmp_path / "ghost-dir").exists()
+
+
+def test_repro7_type_collision_zero_partial_state(tmp_path: Path):
+    """repro7 port: link file 'x' vs target dir 'x/' -> pre-scan error, zero partial state."""
+    link = tmp_path / "a"
+    target = tmp_path / "b"
+    write(link / "x", "A-file-x")
+    write(link / "z.txt", "after-x-in-sorted-order")
+    (target / "x").mkdir(parents=True)
+    write(target / "x" / "inner.txt", "B-dir-x")
+
+    with pytest.raises(MigrateCollisionError) as ei:
+        seed_dir(link, target, force=True)
+    assert "x" in str(ei.value)
+    # zero partial state: nothing copied, nothing swept, nothing deleted
+    assert (link / "x").read_text(encoding="utf-8") == "A-file-x"
+    assert (target / "x" / "inner.txt").read_text(encoding="utf-8") == "B-dir-x"
+    assert not (target / "z.txt").exists()
+    assert not list(target.glob("*.conflict-from-project-*"))
+
+
+def test_repro7b_link_dir_vs_target_file_collision(tmp_path: Path):
+    """Reverse F9 collision: link dir 'x/' vs target file 'x'."""
+    link = tmp_path / "a"
+    target = tmp_path / "b"
+    (link / "x").mkdir(parents=True)
+    write(link / "x" / "inner.txt", "L")
+    write(target / "x", "T-file")
+    with pytest.raises(MigrateCollisionError):
+        seed_dir(link, target, force=True)
+
+
+def test_copy_refuses_nesting_into_dir(tmp_path: Path):
+    """F9: _copy must never silently nest a file into an existing directory."""
+    import boomtube.migrate as M
+
+    src = tmp_path / "src.txt"
+    src.write_text("x", encoding="utf-8")
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    with pytest.raises(MigrateCollisionError):
+        M._copy(src, dst)
+
+
+def test_copy_refuses_write_through_symlink(tmp_path: Path):
+    """F21: _copy must never write through a destination symlink."""
+    import boomtube.migrate as M
+
+    src = tmp_path / "src.txt"
+    src.write_text("x", encoding="utf-8")
+    real = tmp_path / "real.txt"
+    real.write_text("orig", encoding="utf-8")
+    dst = tmp_path / "dst.txt"
+    dst.symlink_to(real)
+    with pytest.raises(MigrateCollisionError):
+        M._copy(src, dst)
+    assert real.read_text(encoding="utf-8") == "orig"

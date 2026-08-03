@@ -107,3 +107,13 @@ def test_truncated_copy_raises_verification_error(tmp_path: Path, monkeypatch: p
     with pytest.raises(CopyVerificationError):
         seed_file(link, target)
     assert not target.exists()
+
+
+def test_file_link_into_dir_target_refused(tmp_path: Path):
+    """F9: a file link must not seed into a directory target."""
+    link = tmp_path / "a.txt"
+    link.write_text("x", encoding="utf-8")
+    target = tmp_path / "dir"
+    target.mkdir()
+    with pytest.raises(MigrateCollisionError):
+        seed_file(link, target)

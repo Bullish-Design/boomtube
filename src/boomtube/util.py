@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+
+CONFLICT_SUFFIX = ".conflict-from-project-"
 
 
-def conflict_timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
+def conflict_name(name: str, content_hash: str) -> str:
+    """Deterministic conflict file name: ``{name}.conflict-from-project-{sha8}``.
+
+    Named per content so re-runs are idempotent (F10); the timestamp survives
+    in the file's mtime.
+    """
+    return f"{name}{CONFLICT_SUFFIX}{content_hash[:8]}"
 
 
 def unique_path(path, *, max_tries: int = 1000):

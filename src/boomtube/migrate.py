@@ -7,11 +7,9 @@ from pathlib import Path
 
 from .fsops import sniff_type
 from .hashing import files_identical, sha256
-from .util import MigrationStats, unique_path
+from .util import CONFLICT_SUFFIX, MigrationStats, conflict_name, unique_path
 
 logger = logging.getLogger(__name__)
-
-CONFLICT_SUFFIX = ".conflict-from-project-"
 
 
 class MigrateCollisionError(RuntimeError):
@@ -99,6 +97,54 @@ def has_real_content(path: Path) -> bool:
     return False
 
 
+def _type_map(root: Path) -> dict[str, str]:
+    """Map rel -> ``file``/``dir`` for every real node under `root`.
+
+    Symlinks and conflict artifacts are excluded (F21/I10). Used by the
+    pre-seed type-collision scan (F9).
+    """
+    out: dict[str, str] = {}
+    if root.is_symlink() or not root.is_dir():
+        return out
+    resolved = root.resolve(strict=False)
+    for dirpath, dirnames, filenames in os.walk(resolved, followlinks=False):
+        dp = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if not (dp / d).is_symlink()]
+        for d in dirnames:
+            if CONFLICT_SUFFIX in d:
+                continue
+            out[str((dp / d).relative_to(resolved))] = "dir"
+        for fn in filenames:
+            if CONFLICT_SUFFIX in fn:
+                continue
+            p = dp / fn
+            if p.is_symlink():
+                continue
+            try:
+                if p.is_file():
+                    out[str(p.relative_to(resolved))] = "file"
+            except OSError:
+                continue
+    return out
+
+
+def _check_type_collisions(
+    link_dir: Path, target_dir: Path, link_map: dict[str, str], target_map: dict[str, str]
+) -> None:
+    """Refuse when the same rel is a dir on one side and a file on the other (F9).
+
+    Runs before any copy or sweep so a collision leaves zero partial state.
+    """
+    for rel in sorted(set(link_map) & set(target_map)):
+        link_type = link_map[rel]
+        target_type = target_map[rel]
+        if link_type != target_type:
+            raise MigrateCollisionError(
+                f"type collision between link ({link_dir}) and target ({target_dir}) at '{rel}': "
+                f"link has a {link_type}, target has a {target_type}"
+            )
+
+
 def _move_aside_conflict(path: Path) -> bool:
     """Move `path` aside as a deterministic ``{name}.conflict-from-project-{sha8}`` file.
 
@@ -111,8 +157,7 @@ def _move_aside_conflict(path: Path) -> bool:
     except FileNotFoundError:
         logger.debug("skipping vanished file %s", path)
         return False
-    name = f"{path.name}{CONFLICT_SUFFIX}{content_hash[:8]}"
-    conflict = path.with_name(name)
+    conflict = path.with_name(conflict_name(path.name, content_hash))
     if conflict.exists():
         if files_identical(conflict, path):
             path.unlink()
@@ -190,6 +235,9 @@ def seed_dir(link_dir: Path, target_dir: Path, *, force: bool = False) -> Migrat
 
     link_snap = snapshot_files(link_dir)
     target_snap = snapshot_files(target_dir) if target_type == "dir" else {}
+
+    # F9: detect dir-vs-file collisions before any copy or sweep (zero partial state).
+    _check_type_collisions(link_dir, target_dir, _type_map(link_dir), _type_map(target_dir))
 
     if link_snap and target_snap:
         rels = sorted(set(link_snap) & set(target_snap))
