@@ -12,10 +12,11 @@ from boomtube.apply import (
     _is_root_or_ancestor,
     _same_target,
     _swap,
-    _verify_snapshot_copied,
+    _verify_manifest_migrated,
     apply_all,
 )
-from boomtube.migrate import CopyVerificationError
+from boomtube.manifest import scan_tree
+from boomtube.migrate import CopyVerificationError, MigrateCollisionError
 from boomtube.models import LinkSpec
 
 
@@ -206,33 +207,63 @@ def test_same_target_on_non_symlink_is_false(tmp_path: Path):
     assert _same_target(plain, tmp_path / "t") is False
 
 
-def test_verify_snapshot_fails_on_truncated_copy(tmp_path: Path):
+def test_verify_manifest_fails_on_truncated_copy(tmp_path: Path):
     """I5: the verify pass rejects a size-mismatched target copy."""
-    src = tmp_path / "src.txt"
-    src.write_text("x" * 100, encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "src.txt").write_text("x" * 100, encoding="utf-8")
+    mf = scan_tree(src)
     dst = tmp_path / "target"
     dst.mkdir()
     (dst / "src.txt").write_text("x" * 10, encoding="utf-8")
     with pytest.raises(CopyVerificationError):
-        _verify_snapshot_copied({"src.txt": src}, dst, "test")
+        _verify_manifest_migrated(mf, dst, "test")
 
 
-def test_verify_snapshot_fails_on_missing_copy(tmp_path: Path):
+def test_verify_manifest_fails_on_missing_copy(tmp_path: Path):
     """I5: the verify pass rejects a missing target copy."""
-    src = tmp_path / "src.txt"
-    src.write_text("x", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "src.txt").write_text("x", encoding="utf-8")
+    mf = scan_tree(src)
     dst = tmp_path / "target"
     dst.mkdir()
     with pytest.raises(CopyVerificationError):
-        _verify_snapshot_copied({"src.txt": src}, dst, "test")
+        _verify_manifest_migrated(mf, dst, "test")
 
 
-def test_verify_snapshot_skips_vanished_sources(tmp_path: Path):
+def test_verify_manifest_skips_vanished_sources(tmp_path: Path):
     """F11: a source that vanished between snapshot and verify is skipped, not an error."""
-    src = tmp_path / "gone.txt"
-    src.write_text("x", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    gone = src / "gone.txt"
+    gone.write_text("x", encoding="utf-8")
+    mf = scan_tree(src)
     dst = tmp_path / "target"
     dst.mkdir()
     # vanish the source before verifying
-    src.unlink()
-    _verify_snapshot_copied({"gone.txt": src}, dst, "test")  # no raise
+    gone.unlink()
+    _verify_manifest_migrated(mf, dst, "test")  # no raise
+
+
+def test_dir_link_target_symlink_refused_at_apply(tmp_path: Path):
+    """Defense in depth: a target that became a symlink at apply time is refused."""
+    from boomtube.apply import apply_link
+    from boomtube.planning import PlannedLink
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    link_dir = project / ".notes"
+    link_dir.mkdir()
+    (link_dir / "a.txt").write_text("a", encoding="utf-8")
+    real = tmp_path / "real"
+    real.mkdir()
+    target = tmp_path / "ext" / "notes"
+    target.parent.mkdir()
+    target.symlink_to(real, target_is_directory=True)
+    spec = LinkSpec(link=".notes", target=str(target), kind="dir", migrate=True)
+    pl = PlannedLink(spec=spec, link_path=(project / ".notes").resolve(), target_path=target, migrate=True)
+
+    with pytest.raises(MigrateCollisionError):
+        apply_link(project, pl)
+    assert not (project / ".notes").is_symlink()

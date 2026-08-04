@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import typer
@@ -29,13 +30,22 @@ def _configure_logging(verbose: bool) -> None:
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
 
-def _resolve_project_and_config(project_root: Path, config: Path | None) -> tuple[Path, Path]:
-    """Resolve the project root and config path (config's parent wins as the root)."""
+def _resolve_project_and_config(project_root: Path | None, config: Path | None) -> tuple[Path, Path]:
+    """Resolve the project root and config path.
+
+    An explicit `--project-root` wins over the config's parent (F8); with no
+    config, the root defaults to cwd (evaluated lazily, not at import time).
+    """
     if config is not None:
         config_path = config.expanduser().resolve(strict=False)
-        return config_path.parent, config_path
-    project_root_resolved = project_root.expanduser().resolve(strict=False)
-    return project_root_resolved, project_root_resolved / "boomtube.yaml"
+        root = (
+            project_root.expanduser().resolve(strict=False)
+            if project_root is not None
+            else config_path.parent
+        )
+        return root, config_path
+    root = (project_root or Path.cwd()).expanduser().resolve(strict=False)
+    return root, root / "boomtube.yaml"
 
 
 def _load_plan(project_root_resolved: Path, config_path: Path):
@@ -46,11 +56,18 @@ def _load_plan(project_root_resolved: Path, config_path: Path):
     return cfg, ctx, planned
 
 
+def _exit_code_for(failures: Sequence[tuple[Path, Exception]]) -> int:
+    """Classify per-link failures: PermissionError (3) > OSError (4) > other (5)."""
+    if any(isinstance(e, PermissionError) for _, e in failures):
+        return 3
+    if any(isinstance(e, OSError) for _, e in failures):
+        return 4
+    return 5
+
+
 @app.command(name="apply")
 def apply(
-    project_root: Path = typer.Option(  # noqa: B008
-        Path.cwd(), "--project-root", help="Project root directory (defaults to cwd)"  # noqa: B008
-    ),
+    project_root: Path | None = typer.Option(None, "--project-root", help="Project root (defaults to cwd)"),  # noqa: B008
     config: Path | None = typer.Option(None, "--config", help="Path to boomtube.yaml"),  # noqa: B008
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging"),  # noqa: B008
     force: bool = typer.Option(  # noqa: B008
@@ -73,7 +90,7 @@ def apply(
             logging.error(
                 "applied %d/%d links", len(result.applied), len(result.applied) + len(result.failed)
             )
-            raise typer.Exit(code=5)
+            raise typer.Exit(code=_exit_code_for(result.failed))
     except (ConfigError, VarResolutionError, PlanError) as e:
         logging.error(str(e))
         raise typer.Exit(code=2) from None
@@ -87,9 +104,7 @@ def apply(
 
 @app.command(name="config")
 def config(
-    project_root: Path = typer.Option(  # noqa: B008
-        Path.cwd(), "--project-root", help="Project root directory (defaults to cwd)"  # noqa: B008
-    ),
+    project_root: Path | None = typer.Option(None, "--project-root", help="Project root (defaults to cwd)"),  # noqa: B008
     config: Path | None = typer.Option(None, "--config", help="Path to boomtube.yaml"),  # noqa: B008
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging"),  # noqa: B008
 ) -> None:

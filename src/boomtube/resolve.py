@@ -24,14 +24,6 @@ def render_template(template: str, ctx: Mapping[str, str]) -> str:
         raise VarResolutionError(f"Invalid template {template!r}: {e}") from e
 
 
-def render(template: str, ctx: Mapping[str, str]) -> str:
-    """Render a string template using `{var}` placeholders.
-
-    Raises VarResolutionError on missing keys.
-    """
-    return render_template(template, ctx)
-
-
 def build_context(project_root: Path, user_vars: dict[str, str] | None) -> dict[str, str]:
     builtins = {
         "project_root": str(project_root),

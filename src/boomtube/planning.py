@@ -52,6 +52,42 @@ def _strictly_inside(inner: Path, outer: Path) -> bool:
     return cp is not None and cp == _casefold(outer) and not _same_path(inner, outer)
 
 
+def _validate_pairwise(planned: list[PlannedLink]) -> None:
+    """Reject duplicate and nested paths across links before any mutation (F5).
+
+    Duplicate `link:` or `target:` paths and any pairwise nesting (link in
+    link, target in target, link in target, target in link) would silently
+    break the earlier link. O(n²) is fine — configs hold tens of links and this
+    runs once before anything is touched.
+    """
+    for attr, label in (("link_path", "link"), ("target_path", "target")):
+        seen: dict[str, PlannedLink] = {}
+        for pl in planned:
+            key = _casefold(getattr(pl, attr))
+            if key in seen:
+                raise PlanError(
+                    f"duplicate {label} path {getattr(pl, attr)} used by both "
+                    f"'{seen[key].spec.name or seen[key].spec.link}' and "
+                    f"'{pl.spec.name or pl.spec.link}'"
+                )
+            seen[key] = pl
+
+    for i, a in enumerate(planned):
+        for b in planned[i + 1 :]:
+            for (pa, la), (pb, lb) in (
+                ((a.link_path, "link"), (b.link_path, "link")),
+                ((a.target_path, "target"), (b.target_path, "target")),
+                ((a.link_path, "link"), (b.target_path, "target")),
+                ((a.target_path, "target"), (b.link_path, "link")),
+            ):
+                if _strictly_inside(pa, pb) or _strictly_inside(pb, pa):
+                    raise PlanError(
+                        f"'{a.spec.name or a.spec.link}' {la} ({pa}) and "
+                        f"'{b.spec.name or b.spec.link}' {lb} ({pb}) are nested; "
+                        "links and targets must be pairwise disjoint"
+                    )
+
+
 def build_plan(project_root: Path, cfg: BoomtubeConfig, ctx: Mapping[str, str]) -> list[PlannedLink]:
     """Render and validate the full plan before any filesystem mutation.
 
@@ -67,6 +103,10 @@ def build_plan(project_root: Path, cfg: BoomtubeConfig, ctx: Mapping[str, str]) 
         rendered = render_template(spec.target, ctx).strip()
         if rendered == "":
             raise PlanError(f"target for link '{display}' renders empty; target must be non-empty")
+        if "\0" in rendered:
+            # Model validation only sees the raw template; a NUL injected via a
+            # `{var}` would otherwise raise an uncaught ValueError from Path() (F15).
+            raise PlanError(f"target for link '{display}' renders to contain a NUL byte; refusing")
 
         # Resolve the link's *parent* (where the symlink will be created), then
         # append the final component. A stale symlink *at* the link path points
@@ -97,6 +137,7 @@ def build_plan(project_root: Path, cfg: BoomtubeConfig, ctx: Mapping[str, str]) 
             )
 
         planned.append(PlannedLink(spec=spec, link_path=link_path, target_path=target_path, migrate=spec.migrate))
+    _validate_pairwise(planned)
     return planned
 
 

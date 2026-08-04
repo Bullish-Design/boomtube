@@ -46,7 +46,7 @@ def test_conflict_files_excluded_from_seeding(tmp_path: Path):
     target = tmp_path / "b"
     write(link / "real.txt", "new")
     write(target / "f.conflict-from-project-12345678", "old conflict")
-    stats = seed_dir(link, target)
+    stats, _ = seed_dir(link, target)
     assert stats.copied_a_to_b == 1
     assert (target / "real.txt").read_text(encoding="utf-8") == "new"
     assert (target / "f.conflict-from-project-12345678").read_text(encoding="utf-8") == "old conflict"

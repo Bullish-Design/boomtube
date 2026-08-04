@@ -34,6 +34,20 @@ def test_cycle_raises(tmp_path: Path):
         resolve_vars({"a": "{b}", "b": "{a}"}, {"project_root": "x", "project_name": "y"})
 
 
+def test_memoized_var_resolution(tmp_path: Path):
+    """A var referenced by two others is resolved once and memoized (F16)."""
+    ctx = build_context(tmp_path, {"b": "x", "a": "{b}", "c": "{b}"})
+    assert ctx["a"] == "x"
+    assert ctx["c"] == "x"
+
+
+def test_recursion_limit_exceeded(tmp_path: Path):
+    vars_dict = {f"v{i}": f"{{v{i + 1}}}" for i in range(60)}
+    vars_dict["v60"] = "end"
+    with pytest.raises(VarResolutionError, match="recursion limit"):
+        build_context(tmp_path, vars_dict)
+
+
 @pytest.mark.parametrize("bad", ["{}", "{", "{x", "{0}"])
 def test_stray_braces_and_positional_fields_raise(tmp_path: Path, bad: str):
     """F5: `{}`/`{`/`{x`/`{0}` must become a typed VarResolutionError, not ValueError."""
@@ -51,9 +65,9 @@ def test_builtins_cannot_be_overridden_in_build_context(tmp_path: Path):
 
 
 def test_render_template_normalizes_stray_braces():
-    from boomtube.resolve import render, render_template
+    from boomtube.resolve import render_template
 
     with pytest.raises(VarResolutionError):
         render_template("{}", {})
     with pytest.raises(VarResolutionError):
-        render("{", {"a": "b"})
+        render_template("{", {"a": "b"})

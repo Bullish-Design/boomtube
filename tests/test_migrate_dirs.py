@@ -7,8 +7,8 @@ import pytest
 from boomtube.migrate import (
     CopyVerificationError,
     MigrateCollisionError,
+    scan_tree,
     seed_dir,
-    snapshot_files,
 )
 
 
@@ -23,10 +23,9 @@ def test_link_only_file_seeded_to_target(tmp_path: Path):
     link = tmp_path / "link"
     target = tmp_path / "target"
     write(link / "only.txt", "x")
-    stats = seed_dir(link, target)
+    stats, _ = seed_dir(link, target)
     assert (target / "only.txt").read_text(encoding="utf-8") == "x"
     assert stats.copied_a_to_b == 1
-    assert stats.copied_b_to_a == 0
 
 
 def test_target_only_file_is_not_copied_back(tmp_path: Path):
@@ -34,7 +33,7 @@ def test_target_only_file_is_not_copied_back(tmp_path: Path):
     link = tmp_path / "link"
     target = tmp_path / "target"
     write(target / "only.txt", "x")
-    stats = seed_dir(link, target)
+    stats, _ = seed_dir(link, target)
     assert stats.copied_a_to_b == 0
     assert not (link / "only.txt").exists()
     assert (target / "only.txt").read_text(encoding="utf-8") == "x"
@@ -62,22 +61,25 @@ def test_same_rel_on_both_sides_raises_collision(tmp_path: Path):
     assert "f.txt" in str(ei.value)
 
 
-def test_force_sweeps_target_aside_and_seeds(tmp_path: Path):
-    """D2 --force: target files become conflict files; link content is authoritative."""
+def test_force_sweeps_colliding_target_aside_and_seeds(tmp_path: Path):
+    """D2 --force: colliding target entries become conflict files; non-colliding stay (F14 (b))."""
     link = tmp_path / "link"
     target = tmp_path / "target"
     write(link / "a.txt", "aaa")
     write(target / "keep.txt", "keep")
     write(target / "f.txt", "old")
     write(link / "f.txt", "new")
-    stats = seed_dir(link, target, force=True)
+    stats, _ = seed_dir(link, target, force=True)
     assert stats.copied_a_to_b == 2
-    assert stats.conflicts == 2
+    assert stats.conflicts == 1  # only f.txt collides; keep.txt is left in place
     assert (target / "a.txt").read_text(encoding="utf-8") == "aaa"
     assert (target / "f.txt").read_text(encoding="utf-8") == "new"
-    conflicts = list(target.glob("*.conflict-from-project-*"))
-    contents = sorted(c.read_text(encoding="utf-8") for c in conflicts)
-    assert contents == ["keep", "old"]
+    # non-colliding target file survives in place (union, not sweep-all)
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "keep"
+    conflicts = list(target.glob("f.txt.conflict-from-project-*"))
+    assert len(conflicts) == 1
+    assert conflicts[0].read_text(encoding="utf-8") == "old"
+    assert not list(target.glob("keep.txt.conflict-from-project-*"))
 
 
 def test_force_is_idempotent_across_runs(tmp_path: Path):
@@ -96,7 +98,10 @@ def test_force_is_idempotent_across_runs(tmp_path: Path):
     assert not any("-1" in name for name in after)
 
 
-def test_inner_symlinks_are_ignored(tmp_path: Path):
+def test_inner_symlinks_are_copied_not_followed(tmp_path: Path):
+    """F1: inner symlinks are recreated verbatim in the target, never followed."""
+    import os
+
     link = tmp_path / "link"
     target = tmp_path / "target"
     link.mkdir()
@@ -108,9 +113,11 @@ def test_inner_symlinks_are_ignored(tmp_path: Path):
     (link / "linkdir").symlink_to(outside, target_is_directory=True)
     write(link / "real.txt", "x")
 
-    stats = seed_dir(link, target)
+    stats, _ = seed_dir(link, target)
     assert stats.copied_a_to_b == 1
-    assert not (target / "linkdir" / "secret.txt").exists()
+    # copied verbatim, never followed: no descent, so no real dir under target
+    assert (target / "linkdir").is_symlink()
+    assert os.readlink(target / "linkdir") == str(outside)
     assert (target / "real.txt").read_text(encoding="utf-8") == "x"
 
 
@@ -134,7 +141,7 @@ def test_vanished_file_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         return real_copy(src, dst)
 
     monkeypatch.setattr(M, "_copy", sneaky)
-    stats = seed_dir(link, target)
+    stats, _ = seed_dir(link, target)
     assert stats.copied_a_to_b == 1  # only g.txt survived the copy
     assert (target / "g.txt").read_text(encoding="utf-8") == "GGGG"
     assert not (target / "f.txt").exists()
@@ -160,7 +167,7 @@ def test_truncated_copy_raises_verification_error(tmp_path: Path, monkeypatch: p
     assert not (target / "big.txt").exists()
 
 
-def test_snapshot_excludes_symlinks_and_specials(tmp_path: Path):
+def test_scan_tree_records_symlinks_and_specials(tmp_path: Path):
     import os
 
     link = tmp_path / "link"
@@ -170,8 +177,8 @@ def test_snapshot_excludes_symlinks_and_specials(tmp_path: Path):
     outside.mkdir()
     (link / "ln").symlink_to(outside, target_is_directory=True)
     os.mkfifo(link / "pipe")
-    snap = snapshot_files(link)
-    assert set(snap) == {"real.txt"}
+    mf = scan_tree(link, exclude_conflicts=False)
+    assert {e.rel: e.kind for e in mf.entries.values()} == {"real.txt": "file", "ln": "symlink", "pipe": "special"}
 
 
 def test_broken_symlink_at_link_root_is_skipped(tmp_path: Path):
@@ -181,7 +188,7 @@ def test_broken_symlink_at_link_root_is_skipped(tmp_path: Path):
     link = tmp_path / "link"
     link.symlink_to(tmp_path / "ghost-dir", target_is_directory=True)
     target = tmp_path / "target"
-    stats = seed_dir(link, target)
+    stats, _ = seed_dir(link, target)
     assert stats.copied_a_to_b == 0
     assert not (tmp_path / "ghost-dir").exists()
 
@@ -254,22 +261,22 @@ def test_seed_dir_into_file_target_refused(tmp_path: Path):
         seed_dir(link, target)
 
 
-def test_snapshot_of_missing_path_is_empty(tmp_path: Path):
-    assert snapshot_files(tmp_path / "nope") == {}
+def test_scan_tree_of_missing_path_is_empty(tmp_path: Path):
+    assert scan_tree(tmp_path / "nope").is_empty
 
 
-def test_snapshot_of_symlink_root_is_empty(tmp_path: Path):
+def test_scan_tree_of_symlink_root_is_empty(tmp_path: Path):
     """F21: a symlinked root is never walked through."""
     real = tmp_path / "real"
     real.mkdir()
     write(real / "x.txt", "x")
     ln = tmp_path / "ln"
     ln.symlink_to(real, target_is_directory=True)
-    assert snapshot_files(ln) == {}
+    assert scan_tree(ln).is_empty
 
 
-def test_snapshot_skips_file_symlinks(tmp_path: Path):
-    """File symlinks inside the tree are excluded from snapshots and type maps."""
+def test_scan_tree_records_file_symlinks(tmp_path: Path):
+    """File symlinks inside the tree are recorded as symlink entries, never followed."""
     import boomtube.migrate as M
 
     link = tmp_path / "link"
@@ -279,20 +286,20 @@ def test_snapshot_skips_file_symlinks(tmp_path: Path):
     real_file.write_text("secret", encoding="utf-8")
     (link / "fileln").symlink_to(real_file)
 
-    snap = snapshot_files(link)
-    assert set(snap) == {"real.txt"}
-    types = M._type_map(link)
-    assert types == {"real.txt": "file"}
+    mf = M.scan_tree(link, exclude_conflicts=False)
+    kinds = {e.rel: e.kind for e in mf.entries.values()}
+    assert kinds == {"real.txt": "file", "fileln": "symlink"}
 
 
-def test_type_map_skips_conflict_dirs(tmp_path: Path):
+def test_scan_tree_link_side_includes_conflict_dirs(tmp_path: Path):
+    """F1: link-side conflict-named entries are real data and are NOT excluded."""
     import boomtube.migrate as M
 
     link = tmp_path / "link"
     link.mkdir()
     (link / "x.conflict-from-project-12345678").mkdir()
-    types = M._type_map(link)
-    assert types == {}
+    mf = M.scan_tree(link, exclude_conflicts=False)
+    assert {e.rel: e.kind for e in mf.entries.values()} == {"x.conflict-from-project-12345678": "dir"}
 
 
 def test_has_real_content_classifications(tmp_path: Path):
@@ -309,6 +316,30 @@ def test_has_real_content_classifications(tmp_path: Path):
     f.write_text("x", encoding="utf-8")
     assert M.has_real_content(f) is True
     assert M.has_real_content(tmp_path / "missing") is False
+
+
+def test_has_real_content_symlinks_subdirs_conflicts(tmp_path: Path):
+    """F2: a dir of only symlinks / empty subdirs / conflict files is real content."""
+    import boomtube.migrate as M
+
+    symlinks = tmp_path / "symlinks"
+    symlinks.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x").write_text("x", encoding="utf-8")
+    (symlinks / "s1").symlink_to(outside / "x")
+    (symlinks / "s2").symlink_to(outside / "x")
+    assert M.has_real_content(symlinks) is True
+
+    subdirs = tmp_path / "subdirs"
+    subdirs.mkdir()
+    (subdirs / "empty-sub").mkdir()
+    assert M.has_real_content(subdirs) is True
+
+    conflicts = tmp_path / "conflicts"
+    conflicts.mkdir()
+    write(conflicts / "a.conflict-from-project-12345678", "x")
+    assert M.has_real_content(conflicts) is True
 
 
 def test_seed_dir_file_link_refused(tmp_path: Path):
@@ -331,3 +362,119 @@ def test_seed_dir_target_symlink_refused(tmp_path: Path):
     with pytest.raises(MigrateCollisionError):
         seed_dir(link, target)
     assert not (real / "x.txt").exists()
+
+
+def test_force_sweeps_target_symlink_into_conflict(tmp_path: Path):
+    """2d: a colliding target symlink is swept aside keyed by its RAW target string."""
+    import os
+
+    link = tmp_path / "link"
+    link.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    (link / "ln").symlink_to("link-side")
+    write(link / "a.txt", "x")
+    (target / "ln").symlink_to("target-side")
+
+    stats, _ = seed_dir(link, target, force=True)
+    assert stats.conflicts == 1
+    assert (target / "ln").is_symlink()
+    assert os.readlink(target / "ln") == "link-side"
+    conflicts = list(target.glob("ln.conflict-from-project-*"))
+    assert len(conflicts) == 1
+    assert conflicts[0].is_symlink()
+    assert os.readlink(conflicts[0]) == "target-side"
+
+
+def test_force_sweep_skips_identical_symlink(tmp_path: Path):
+    """2d: a colliding symlink with the same raw target is left alone (idempotent)."""
+    import os
+
+    link = tmp_path / "link"
+    link.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    write(link / "a.txt", "x")
+    (link / "ln").symlink_to("shared")
+    (target / "ln").symlink_to("shared")
+
+    stats, _ = seed_dir(link, target, force=True)
+    assert stats.conflicts == 0
+    assert os.readlink(target / "ln") == "shared"
+
+
+def test_same_entry_content_symlink_and_fallthrough(tmp_path: Path):
+    """_same_entry_content: symlink-vs-symlink and mixed-type fallthrough."""
+    import boomtube.migrate as M
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.symlink_to("x")
+    b.symlink_to("x")
+    assert M._same_entry_content(a, b) is True
+    b.unlink()
+    b.symlink_to("y")
+    assert M._same_entry_content(a, b) is False
+    c = tmp_path / "c"
+    c.write_text("x", encoding="utf-8")
+    assert M._same_entry_content(a, c) is False  # symlink vs file
+
+
+def test_copy_symlink_idempotent_and_refusals(tmp_path: Path):
+    """_copy_symlink: same target is a no-op; an existing file/dir is refused."""
+    import os
+
+    import boomtube.migrate as M
+
+    dst = tmp_path / "dst"
+    dst.symlink_to("same")
+    M._copy_symlink(dst, "same")  # no-op, still a symlink to 'same'
+    assert dst.is_symlink()
+    assert os.readlink(dst) == "same"
+    dst.unlink()
+    dst.symlink_to("old")
+    M._copy_symlink(dst, "new")  # replaced verbatim
+    assert os.readlink(dst) == "new"
+
+    f = tmp_path / "f"
+    f.write_text("x", encoding="utf-8")
+    with pytest.raises(MigrateCollisionError):
+        M._copy_symlink(f, "any")
+    d = tmp_path / "d"
+    d.mkdir()
+    with pytest.raises(MigrateCollisionError):
+        M._copy_symlink(d, "any")
+
+
+def test_seed_dir_symlink_loop_is_idempotent(tmp_path: Path):
+    """Re-seeding with --force leaves an already-correct symlink untouched (inode-stable)."""
+    import os
+
+    import boomtube.migrate as M
+
+    link = tmp_path / "link"
+    target = tmp_path / "target"
+    link.mkdir()
+    target.mkdir()
+    (link / "ln").symlink_to("x")
+    write(link / "a.txt", "x")
+    M.seed_dir(link, target)
+    first = (target / "ln").lstat().st_ino
+    M.seed_dir(link, target, force=True)
+    assert (target / "ln").lstat().st_ino == first
+    assert os.readlink(target / "ln") == "x"
+
+
+def test_force_sweep_merges_shared_subdirs(tmp_path: Path):
+    """2b: a dir present on both sides is merged, not swept as a conflict."""
+    link = tmp_path / "link"
+    target = tmp_path / "target"
+    (link / "sub").mkdir(parents=True)
+    write(link / "sub" / "f.txt", "f")
+    (target / "sub").mkdir(parents=True)
+    write(target / "sub" / "g.txt", "g")
+
+    stats, _ = seed_dir(link, target, force=True)
+    assert stats.conflicts == 0
+    assert (target / "sub" / "f.txt").read_text(encoding="utf-8") == "f"
+    assert (target / "sub" / "g.txt").read_text(encoding="utf-8") == "g"
