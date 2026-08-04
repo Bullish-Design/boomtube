@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import logging
 import os
 import shutil
@@ -7,7 +9,8 @@ from pathlib import Path
 
 from .fsops import sniff_type
 from .hashing import files_identical, sha256
-from .util import CONFLICT_SUFFIX, MigrationStats, conflict_name, unique_path
+from .manifest import Manifest, scan_tree
+from .util import MigrationStats, conflict_name, unique_path
 
 logger = logging.getLogger(__name__)
 
@@ -16,8 +19,16 @@ class MigrateCollisionError(RuntimeError):
     """Both the link and the target hold real content (D2) or a write-through was attempted."""
 
 
-class CopyVerificationError(OSError):
-    """A copied file failed post-copy size verification (F15)."""
+class UnsupportedLinkTypeError(RuntimeError):
+    """The link tree holds a special file (FIFO/socket/device) that cannot be migrated (F20)."""
+
+
+class CopyVerificationError(RuntimeError):
+    """A copied file failed post-copy size verification (F15).
+
+    Deliberately NOT an OSError: this is a boomtube-level refusal, not an I/O
+    error, so the CLI maps it to exit 5 rather than 4 (F7).
+    """
 
 
 def _ensure_parent(path: Path) -> None:
@@ -55,94 +66,61 @@ def _copy(src: Path, dst: Path) -> None:
         )
 
 
-def snapshot_files(root: Path) -> dict[str, Path]:
-    """Map relpath -> Path for real files under `root` (no symlink traversal).
-
-    Symlinks and special files are excluded (F21); conflict artifacts
-    (``*.conflict-from-project-*``) are excluded so re-runs are idempotent
-    (I10); only real regular files count as seedable content.
-    """
-    out: dict[str, Path] = {}
-    if root.is_symlink():
-        return out
-    resolved = root.resolve(strict=False)
-    if not resolved.is_dir():
-        return out
-    for dirpath, dirnames, filenames in os.walk(resolved, followlinks=False):
-        dp = Path(dirpath)
-        # Prevent descending into symlinked directories.
-        dirnames[:] = [d for d in dirnames if not (dp / d).is_symlink()]
-        for fn in filenames:
-            if CONFLICT_SUFFIX in fn:
-                continue
-            p = dp / fn
-            if p.is_symlink():
-                continue
-            try:
-                if not p.is_file():
-                    continue
-            except OSError:
-                continue
-            out[str(p.relative_to(resolved))] = p
-    return out
-
-
 def has_real_content(path: Path) -> bool:
-    """True if `path` holds real (non-symlink) files; empty dirs don't count (I8)."""
+    """True if `path` holds anything at all. Only a truly empty directory is 'no content'.
+
+    ``os.scandir`` does not follow symlinks and short-circuits on the first
+    entry, so a directory holding only symlinks, only empty subdirs, or only
+    conflict-named files counts as real content (F2 — the README's
+    `migrate: false` guarantee requires this).
+    """
     t = sniff_type(path)
     if t == "file":
         return True
     if t == "dir":
-        return bool(snapshot_files(path))
+        with os.scandir(path) as it:
+            return any(True for _ in it)
     return False
 
 
-def _type_map(root: Path) -> dict[str, str]:
-    """Map rel -> ``file``/``dir`` for every real node under `root`.
-
-    Symlinks and conflict artifacts are excluded (F21/I10). Used by the
-    pre-seed type-collision scan (F9).
-    """
-    out: dict[str, str] = {}
-    if root.is_symlink() or not root.is_dir():
-        return out
-    resolved = root.resolve(strict=False)
-    for dirpath, dirnames, filenames in os.walk(resolved, followlinks=False):
-        dp = Path(dirpath)
-        dirnames[:] = [d for d in dirnames if not (dp / d).is_symlink()]
-        for d in dirnames:
-            if CONFLICT_SUFFIX in d:
-                continue
-            out[str((dp / d).relative_to(resolved))] = "dir"
-        for fn in filenames:
-            if CONFLICT_SUFFIX in fn:
-                continue
-            p = dp / fn
-            if p.is_symlink():
-                continue
-            try:
-                if p.is_file():
-                    out[str(p.relative_to(resolved))] = "file"
-            except OSError:
-                continue
-    return out
-
-
-def _check_type_collisions(
-    link_dir: Path, target_dir: Path, link_map: dict[str, str], target_map: dict[str, str]
-) -> None:
-    """Refuse when the same rel is a dir on one side and a file on the other (F9).
+def _check_type_collisions(link_mf: Manifest, target_mf: Manifest) -> None:
+    """Refuse when the same rel has a different kind on each side (F9).
 
     Runs before any copy or sweep so a collision leaves zero partial state.
+    Covers ALL kinds — including target-side symlinks (F11) and empty dirs —
+    so a target containing *only* symlinks now counts as populated.
     """
-    for rel in sorted(set(link_map) & set(target_map)):
-        link_type = link_map[rel]
-        target_type = target_map[rel]
-        if link_type != target_type:
+    for rel in sorted(set(link_mf.entries) & set(target_mf.entries)):
+        a, b = link_mf.entries[rel].kind, target_mf.entries[rel].kind
+        if a != b:
             raise MigrateCollisionError(
-                f"type collision between link ({link_dir}) and target ({target_dir}) at '{rel}': "
-                f"link has a {link_type}, target has a {target_type}"
+                f"type collision between link ({link_mf.root}) and target ({target_mf.root}) at '{rel}': "
+                f"link has a {a}, target has a {b}"
             )
+
+
+def _content_key(path: Path) -> str:
+    """Content hash for conflict naming — symlinks are keyed by RAW target string (2d).
+
+    ``sha256(path)`` would *follow* a symlink; hashing the raw readlink string
+    preserves the pointer without touching what it points at.
+    """
+    if sniff_type(path) == "symlink":
+        return hashlib.sha256(os.readlink(path).encode("utf-8")).hexdigest()
+    return sha256(path)
+
+
+def _same_entry_content(a: Path, b: Path) -> bool:
+    """True if two paths hold the same content (files by hash, symlinks by raw target)."""
+    ta, tb = sniff_type(a), sniff_type(b)
+    if ta == "symlink" and tb == "symlink":
+        try:
+            return os.readlink(a) == os.readlink(b)
+        except OSError:
+            return False
+    if ta == "file" and tb == "file":
+        return files_identical(a, b)
+    return False
 
 
 def _move_aside_conflict(path: Path) -> bool:
@@ -151,20 +129,42 @@ def _move_aside_conflict(path: Path) -> bool:
     Returns True when a conflict file was created/kept (I10). If a conflict file
     with identical content already exists, the original is dropped (idempotent);
     a same-name different-content conflict is deduped with a numeric suffix.
+    Symlinks are keyed by their raw target string, never followed (2d).
     """
     try:
-        content_hash = sha256(path)
-    except FileNotFoundError:
+        content_hash = _content_key(path)
+    except OSError:
         logger.debug("skipping vanished file %s", path)
         return False
     conflict = path.with_name(conflict_name(path.name, content_hash))
     if conflict.exists():
-        if files_identical(conflict, path):
+        if _content_key(conflict) == content_hash:
             path.unlink()
             return True
         conflict = unique_path(conflict)
     os.replace(path, conflict)
     return True
+
+
+def _copy_symlink(dst: Path, raw_target: str) -> None:
+    """Recreate a symlink verbatim at `dst`.
+
+    The raw target is preserved, so relative symlinks stay relative — resolving
+    them here would silently rewrite them (2c). Idempotent: a symlink already
+    pointing at the same raw target is left untouched.
+    """
+    t = sniff_type(dst)
+    if t == "symlink":
+        try:
+            if os.readlink(dst) == raw_target:
+                return  # already correct — idempotent re-run
+        except OSError:
+            pass
+        dst.unlink()
+    elif t in ("file", "dir"):
+        raise MigrateCollisionError(f"refusing to replace existing {t} with symlink: {dst}")
+    _ensure_parent(dst)
+    os.symlink(raw_target, dst)
 
 
 def seed_file(link: Path, target: Path, *, force: bool = False) -> MigrationStats:
@@ -210,19 +210,23 @@ def seed_file(link: Path, target: Path, *, force: bool = False) -> MigrationStat
     return stats
 
 
-def seed_dir(link_dir: Path, target_dir: Path, *, force: bool = False) -> MigrationStats:
+def seed_dir(link_dir: Path, target_dir: Path, *, force: bool = False) -> tuple[MigrationStats, Manifest]:
     """Seed link_dir -> target_dir (D1: one direction only).
 
     Refuses when both roots hold real content (D2) unless `--force`, which
-    moves every target-side file aside as deterministic conflict files before
-    seeding from the link side.
+    moves every *colliding* target-side entry aside as deterministic conflict
+    files before seeding from the link side (F14 decision (b): non-colliding
+    target content stays in place — the merged tree is a union).
+
+    Returns ``(stats, link_manifest)`` so the caller can re-verify the migrated
+    tree without re-walking it (F16).
     """
     stats = MigrationStats()
     link_type = sniff_type(link_dir)
     target_type = sniff_type(target_dir)
 
     if link_type in ("missing", "symlink"):
-        return stats
+        return stats, scan_tree(link_dir, exclude_conflicts=False)
     if link_type != "dir":
         raise MigrateCollisionError(f"cannot seed non-directory link content from {link_dir} (type {link_type})")
 
@@ -233,14 +237,26 @@ def seed_dir(link_dir: Path, target_dir: Path, *, force: bool = False) -> Migrat
             f"target {target_dir} is a file but link {link_dir} is a directory; type mismatch"
         )
 
-    link_snap = snapshot_files(link_dir)
-    target_snap = snapshot_files(target_dir) if target_type == "dir" else {}
+    # Link side: exclude NOTHING — symlinks, empty dirs and conflict-named files
+    # are all real data (F1). Target side: exclude conflict artifacts so re-runs
+    # are idempotent (I10).
+    link_mf = scan_tree(link_dir, exclude_conflicts=False)
+    specials = link_mf.of_kind("special")
+    if specials:
+        detail = ", ".join(e.rel for e in specials[:5])
+        raise UnsupportedLinkTypeError(
+            f"link tree {link_dir} contains special file(s) (FIFO/socket/device) that cannot be "
+            f"migrated: {detail}; move or delete them first"
+        )
+    target_mf = (
+        scan_tree(target_dir, exclude_conflicts=True) if target_type == "dir" else Manifest(root=target_dir, entries={})
+    )
 
-    # F9: detect dir-vs-file collisions before any copy or sweep (zero partial state).
-    _check_type_collisions(link_dir, target_dir, _type_map(link_dir), _type_map(target_dir))
+    # F9/F11: type collisions over ALL kinds, before any copy or sweep.
+    _check_type_collisions(link_mf, target_mf)
 
-    if link_snap and target_snap:
-        rels = sorted(set(link_snap) & set(target_snap))
+    if link_mf.entries and target_mf.entries:
+        rels = sorted(set(link_mf.entries) & set(target_mf.entries))
         if not force:
             if rels:
                 detail = ", ".join(rels[:5]) + ("..." if len(rels) > 5 else "")
@@ -252,28 +268,46 @@ def seed_dir(link_dir: Path, target_dir: Path, *, force: bool = False) -> Migrat
                 f"both link ({link_dir}) and target ({target_dir}) are non-empty; "
                 "pass --force to move the target side aside as conflict files"
             )
-        # Sweep target files that are not already identical to the link's file
-        # at the same rel (identical files are already seeded; re-sweeping them
-        # would create spurious conflict files on every re-run).
-        for rel in sorted(target_snap):
+        # --force: sweep only the colliding rels (F14 (b)). Dir/dir is a merge,
+        # not a conflict; identical content is already seeded and must not be
+        # re-swept (that would create spurious conflict files on every re-run).
+        for rel in rels:
+            link_e = link_mf.entries[rel]
+            target_e = target_mf.entries[rel]
+            if link_e.kind == "dir" and target_e.kind == "dir":
+                continue
             target_file = target_dir / rel
-            counterpart = link_snap.get(rel)
-            if counterpart is not None and files_identical(counterpart, target_file):
+            if _same_entry_content(link_dir / rel, target_file):
                 continue
             if _move_aside_conflict(target_file):
                 stats.conflicts += 1
-        target_snap = {}
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    for rel in sorted(link_snap):
-        src = link_snap[rel]
-        dst = target_dir / rel
+
+    # 1. directories, shallowest first (recreates EMPTY dirs — F1)
+    for e in sorted(link_mf.of_kind("dir"), key=lambda e: (e.rel.count(os.sep), e.rel)):
+        dst = target_dir / e.rel
+        dst.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            shutil.copystat(link_mf.root / e.rel, dst)  # best effort: mode/mtime
+        stats.dirs_created += 1
+
+    # 2. regular files — unchanged _copy(), still size-verified
+    for e in sorted(link_mf.of_kind("file"), key=lambda e: e.rel):
+        src, dst = link_mf.root / e.rel, target_dir / e.rel
         try:
-            if dst.is_file() and files_identical(src, dst):
+            if sniff_type(dst) == "file" and files_identical(src, dst):
                 stats.identical += 1
                 continue
             _copy(src, dst)
             stats.copied_a_to_b += 1
         except FileNotFoundError:
             logger.debug("skipping vanished file %s", src)
-    return stats
+
+    # 3. symlinks last, so their parents exist
+    for e in sorted(link_mf.of_kind("symlink"), key=lambda e: e.rel):
+        assert e.link_target is not None
+        _copy_symlink(target_dir / e.rel, e.link_target)
+        stats.symlinks_copied += 1
+
+    return stats, link_mf

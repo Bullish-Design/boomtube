@@ -32,6 +32,36 @@ links:
     assert c.links[0].link == ".notes"
 
 
+def test_readme_example_config_still_validates(tmp_path: Path):
+    """F9: every example config in the README still validates under extra=forbid."""
+    cfg = write(
+        tmp_path / "boomtube.yaml",
+        """
+version: 1
+
+vars:
+  notes_root: "~/Documents/Notes"
+  data_dir: "/mnt/data"
+
+links:
+  - name: Project Notes
+    link: ".notes"
+    target: "{notes_root}/Projects/{project_name}"
+    kind: dir
+    migrate: true
+
+  - name: Local Config
+    link: ".env.local"
+    target: "{data_dir}/configs/{project_name}.env"
+    kind: file
+    migrate: true
+""",
+    )
+    c = load_config(cfg)
+    assert c.version == 1
+    assert len(c.links) == 2
+
+
 def test_missing_version_fails(tmp_path: Path):
     cfg = write(
         tmp_path / "boomtube.yaml",

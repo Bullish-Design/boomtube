@@ -4,6 +4,11 @@
   # https://devenv.sh/basics/
   env.GREET = "devenv";
 
+  # Point tools that honor VIRTUAL_ENV (pip, pytest) at the uv-managed devenv
+  # venv. devenv's uv integration pins the venv location via
+  # UV_PROJECT_ENVIRONMENT, which those tools do not honor.
+  env.VIRTUAL_ENV = "${config.env.DEVENV_STATE}/venv";
+
   # https://devenv.sh/packages/
   packages = [ 
     pkgs.git 
@@ -16,8 +21,17 @@
       python = {
           enable = true;
           version = "3.13";
-          venv.enable = true;
-          uv.enable = true;
+          # Delegate venv management entirely to uv: uv syncs its venv (located
+          # at $UV_PROJECT_ENVIRONMENT under .devenv/state) on shell entry with
+          # the dev extras. devenv's own plain venv (venv.enable) would create a
+          # second, dependency-free venv and shadow it via VIRTUAL_ENV.
+          uv = {
+              enable = true;
+              sync = {
+                  enable = true;
+                  extras = [ "dev" ];
+                };
+            };
         };
     };
 

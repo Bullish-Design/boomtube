@@ -169,7 +169,10 @@ Enable safe migration when `true` (default: `true`). When enabled:
 - Copies are size-verified before the source is removed
 - Conflicts (both sides populated) are refused unless `--force`
 
-When `migrate: false` and the link path already contains real files or directories, `boomtube apply` refuses and exits 5 — pass `--force` to replace without migrating. (Empty directories at the link path are replaced silently.)
+When `migrate: false` and the link path already contains real content, `boomtube apply`
+refuses and exits 5 — pass `--force` to replace without migrating. Only a *truly empty*
+directory is replaced silently: a directory holding only symlinks, only empty subdirectories,
+or only conflict-named files counts as non-empty.
 
 ## Usage
 
@@ -186,7 +189,8 @@ boomtube apply [OPTIONS]
 **Options:**
 - `--config FILE`: Specify config file (default: `boomtube.yaml`)
 - `--verbose`: Enable debug logging
-- `--force`, `-f`: Override `migrate: false` / both-populated refusals (replaces the target side, preserving it as conflict files)
+- `--force`, `-f`: Override `migrate: false` / both-populated refusals (moves colliding target
+  entries aside as conflict files, then seeds from the link side)
 
 **Examples:**
 
@@ -227,6 +231,9 @@ Validates the config and prints the fully resolved plan (all variables and targe
 - `4`: I/O error
 - `5`: One or more links failed to apply (others may have succeeded)
 
+When several per-link failures occur in one run, the most specific exit code wins:
+`3` (permission) > `4` (I/O) > `5` (other).
+
 ## Safety guarantees
 
 Boomtube rejects, before touching the filesystem, any config that is a data-loss hazard by construction:
@@ -241,10 +248,22 @@ Additional guarantees during `apply`:
 
 - Geometry is re-verified for each link against the live filesystem immediately before mutation
 - Every copy is **size-verified** before its source can be deleted
-- Every file in the pre-seed snapshot of the link tree must have a verified copy in the target before the swap proceeds
-- The swap is atomic: the old path is moved aside, the symlink installed, then the old tree removed — a crash at any point leaves data recoverable (in the target or in a `.bt-staging-*` tree that a re-run reclaims)
-- `migrate: false` never deletes non-empty real content without an explicit `--force`
+- Every entry in the pre-seed **manifest** of the link tree — files, empty directories, and
+  symlinks alike — must have a verified copy in the target before the swap proceeds. (The
+  manifest is lossless: symlinks are recorded and recreated verbatim, never followed;
+  empty directories are recreated; a user's own `*.conflict-from-project-*` files are real
+  data, not artifacts)
+- Special files (FIFOs/sockets/devices) anywhere in a migrated tree cause a **refusal**, never
+  a silent skip
+- The swap is atomic: the old path is moved aside, the symlink installed, then the old tree
+  removed — a crash at any point leaves data recoverable (in the target or in a `.bt-staging-*`
+  tree that a re-run either reclaims or quarantines as `.bt-orphan-*`, which is never
+  auto-deleted)
+- `migrate: false` never deletes non-empty real content without an explicit `--force` —
+  "non-empty" includes directories holding only symlinks, only empty subdirectories, or only
+  conflict-named files
 - `remove_path` is never called on the project root or its ancestors
+- Duplicate or nested link/target paths across links are rejected at preflight (exit 2)
 
 ## Migration Behavior
 
@@ -252,12 +271,23 @@ Additional guarantees during `apply`:
 
 When migrating directories (one-directional, link → target):
 
-1. **Pre-scan** the link tree (lstat, rel → type) and compare against the target
-2. A dir-vs-file type collision at the same relative path is a per-link error **before any copy** — no partial state
-3. **If both the link and target hold real content**, migration refuses (`MigrateCollisionError`, exit 5) unless `--force`, which moves the target's content aside as conflict files first
-4. Files are copied link → target, **size-verified** per copy
-5. Symlinks and special files inside the trees are skipped, never followed
-6. Files that disappear mid-migration are skipped (no crash)
+1. **Scan** the link tree (lstat-based, lossless): regular files, empty directories and
+   symlinks are all recorded; symlinks are never followed
+2. A type collision at the same relative path (e.g. file vs dir, file vs symlink) is a
+   per-link error **before any copy** — no partial state. A target containing only symlinks
+   counts as populated
+3. **If both the link and target hold real content**, migration refuses (`MigrateCollisionError`,
+   exit 5) unless `--force`, which moves only the *colliding* target entries aside as conflict
+   files first; non-colliding target content stays in place (the merged tree is a union)
+4. Empty directories are **recreated** in the target, shallowest first
+5. Files are copied link → target, **size-verified** per copy
+6. **Symlinks are copied verbatim, never followed** — including broken and relative ones (a
+   relative symlink stays relative; resolving it would silently rewrite it)
+7. **Special files (FIFOs/sockets/devices) anywhere in the tree are refused** (`UnsupportedLinkTypeError`,
+   exit 5) before anything is mutated
+8. Files that disappear mid-migration are skipped (no crash)
+9. Hardlinks are not preserved: hardlinked files in a migrated tree are copied as independent
+   files (the link relationship is lost)
 
 ### File Migration
 
@@ -269,13 +299,18 @@ When migrating individual files (one-directional, link → target):
 
 ### Conflict Files
 
-When automatic resolution isn't possible (both sides populated with `--force`), Boomtube preserves the target side as conflict files:
+When automatic resolution isn't possible (both sides populated with `--force`), Boomtube
+preserves the *colliding* target entries as conflict files. Non-colliding target content is
+left in place — the migrated tree is a union, and only an entry that shares a path with link
+content is moved aside:
 
 **Format:** `{original_name}.conflict-from-project-{sha256-of-content (8 chars)}`
 
 **Example:** `.env.local.conflict-from-project-1a2b3c4d`
 
-Conflict files are excluded from future migrations and named deterministically by content, so re-running an apply is idempotent with respect to conflicts. The timestamp is preserved in each conflict file's mtime.
+Conflict files are excluded from future target scans and named deterministically by content
+(a symlink's key is its raw target string, never its referent), so re-running an apply is
+idempotent with respect to conflicts. The timestamp is preserved in each conflict file's mtime.
 
 ## Development
 
@@ -287,8 +322,9 @@ This project uses [devenv](https://devenv.sh/) with Nix for reproducible develop
 # Enter development shell
 devenv shell
 
-# Run tests in devenv
-devenv test
+# Run tests (use `uv run`, not bare `pytest`: in the devenv shell the nix-store
+# interpreter is on PATH, and pytest is only on the uv-managed venv's PATH)
+devenv shell -- uv run pytest -q
 ```
 
 ### Manual Setup
@@ -319,8 +355,9 @@ boomtube/
 │   ├── apply.py          # Per-link apply pipeline (validate -> seed -> verify -> swap)
 │   ├── cli.py            # Typer CLI interface (apply, config)
 │   ├── config.py         # Configuration loading and validation
-│   ├── fsops.py          # Atomic filesystem primitives + type sniffing
+│   ├── fsops.py          # Atomic filesystem primitives + crash-residue reclamation
 │   ├── hashing.py        # Content hashing utilities
+│   ├── manifest.py       # Lossless tree scanner (files, empty dirs, symlinks) + verifier
 │   ├── migrate.py        # One-directional seed (link -> target) + collision handling
 │   ├── models.py         # Pydantic data models (static, context-free validation)
 │   ├── planning.py       # Preflight plan: render targets, geometry validation
@@ -336,20 +373,20 @@ boomtube/
 ### Run All Tests
 
 ```bash
-pytest
+uv run pytest
 ```
 
 ### Run with Coverage
 
 ```bash
-pytest --cov=boomtube --cov-report=term-missing
+uv run pytest --cov=boomtube --cov-report=term-missing
 ```
 
 ### Run Specific Test Files
 
 ```bash
-pytest tests/test_migrate_dirs.py
-pytest tests/test_config.py
+uv run pytest tests/test_migrate_dirs.py
+uv run pytest tests/test_config.py
 ```
 
 ### Test Coverage
@@ -380,10 +417,14 @@ The test suite covers:
 - All templates are rendered during preflight, before any filesystem mutation
 
 **Migration Logic:**
+- Lossless manifest scan (lstat): files, empty directories, and symlinks are all recorded
 - One-directional seed (link → target); both-populated is refused unless `--force`
-- Pre-scan for type collisions before any copy
+- Type collisions across all kinds checked before any copy
 - Size-verified copies; vanished files skipped
-- Deterministic conflict files named by content hash, excluded from future seeds
+- Symlinks recreated verbatim (relative stays relative); special files refused
+- Deterministic conflict files named by content hash, excluded from future target scans
+- Crash residue (`.bt-staging-*`/`.bt-tmp-*`) is only deleted when verified against the target;
+  unverifiable residue is quarantined as `.bt-orphan-*` and never auto-deleted
 
 **Symlink Management:**
 - Geometry validated at preflight and re-verified per link at apply time
@@ -397,7 +438,7 @@ MIT
 ## Contributing
 
 Contributions are welcome. Please ensure:
-- All tests pass: `pytest`
+- All tests pass: `uv run pytest`
 - Code is formatted: `ruff format`
 - Linting passes: `ruff check`
 - Line length stays under 120 characters
@@ -405,7 +446,32 @@ Contributions are welcome. Please ensure:
 
 ## Version History
 
-### 0.2.0 (Current)
+### 0.3.0 (Current)
+
+Manifest-safety release (002): every safety mechanism is now defined in terms of a lossless
+manifest, closing the gap where symlinks, special files, empty directories, and conflict-named
+files inside a migrated directory were silently deleted:
+
+- **Lossless tree manifests**: symlinks are recreated verbatim (never followed, relative stays
+  relative); empty directories are recreated; a user's own `*.conflict-from-project-*` files are
+  treated as real data
+- **Special files refused**: a FIFO/socket/device anywhere in a migrated tree is a typed refusal
+  before anything is mutated, never silent loss
+- **Verified crash-residue reclamation**: `.bt-staging-*` trees are only deleted when their
+  contents are verified in the target; anything unverifiable is quarantined as `.bt-orphan-*`
+  and never auto-deleted; reclaim globs are metachar-escaped
+- **`migrate: false` now honors the README guarantee**: a directory holding only symlinks, only
+  empty subdirs, or only conflict-named files counts as non-empty and requires `--force`
+- **Cross-link preflight**: duplicate or nested link/target paths are rejected at preflight (exit 2)
+- **Symlink repointing** (editing `target:`) creates the new target instead of leaving a dangling
+  link; dangling file symlinks are reported as a warning, exit stays 0
+- **Reachable exit codes**: real `PermissionError` during apply → 3, plain `OSError` → 4
+  (precedence 3 > 4 > 5); an explicit `--project-root` wins over the config's parent
+- **`extra="forbid"`**: a typo like `migrat: false` is rejected instead of silently ignored
+- **Hardenings**: NUL-byte validation (including via `{var}` rendering), basename-based dot
+  heuristic, `lexists`-based unique paths, block-wise identical-file comparison, dead code removal
+
+### 0.2.0
 
 Major safety and usability release:
 - **Validate → plan → verify → swap pipeline**: geometry and templates are validated before any filesystem mutation; unsafe configs fail with exit 2 and zero changes

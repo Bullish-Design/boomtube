@@ -56,18 +56,95 @@ def test_rename_aside_moves_path(tmp_path: Path):
     assert staging.name.startswith("data.bt-staging-")
 
 
-def test_reclaim_staging_residue_removes_stale_tree(tmp_path: Path):
+def test_reclaim_staging_residue_removes_verified_tree(tmp_path: Path):
+    """F3: residue whose contents are provably in the target is removed."""
     stale = tmp_path / "data.bt-staging-999"
     stale.mkdir()
     (stale / "x.txt").write_text("old", encoding="utf-8")
-    fsops.reclaim_staging_residue(tmp_path / "data")
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "x.txt").write_text("old", encoding="utf-8")
+    fsops.reclaim_staging_residue(tmp_path / "data", verified_against=target)
     assert not stale.exists()
+
+
+def test_reclaim_staging_residue_quarantines_unverified_tree(tmp_path: Path):
+    """F3: residue with content NOT in the target is quarantined as .bt-orphan and survives."""
+    stale = tmp_path / "data.bt-staging-999"
+    stale.mkdir()
+    (stale / "x.txt").write_text("old", encoding="utf-8")
+    (stale / "only-copy.txt").write_text("unique data", encoding="utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "x.txt").write_text("old", encoding="utf-8")
+
+    fsops.reclaim_staging_residue(tmp_path / "data", verified_against=target)
+    orphans = list(tmp_path.glob("data.bt-orphan*"))
+    assert len(orphans) == 1
+    assert (orphans[0] / "only-copy.txt").read_text(encoding="utf-8") == "unique data"
+    assert (orphans[0] / "x.txt").read_text(encoding="utf-8") == "old"
+    assert not stale.exists()
+
+    # an orphan survives a second reclaim call
+    fsops.reclaim_staging_residue(tmp_path / "data", verified_against=target)
+    assert (orphans[0] / "only-copy.txt").read_text(encoding="utf-8") == "unique data"
+
+
+def test_reclaim_never_matches_orphans(tmp_path: Path):
+    """F3: .bt-orphan-* is deliberately not matched by the reclaim globs."""
+    orphan = tmp_path / "data.bt-orphan-1"
+    orphan.mkdir()
+    (orphan / "x.txt").write_text("x", encoding="utf-8")
+    fsops.reclaim_staging_residue(tmp_path / "data", verified_against=tmp_path / "target")
+    assert orphan.exists()
+
+
+def test_reclaim_removes_file_and_symlink_residue(tmp_path: Path):
+    """File/symlink residue is always redundant and removed (D5)."""
+    f = tmp_path / "data.bt-staging-999"
+    f.write_text("x", encoding="utf-8")
+    ln = tmp_path / "data.bt-tmp-999"
+    ln.symlink_to(tmp_path / "ghost")
+    fsops.reclaim_staging_residue(tmp_path / "data")
+    assert not f.exists()
+    assert not ln.exists()
+
+
+def test_reclaim_verified_tree_remove_failure_is_logged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A failing remove of a verified tree is logged, never raised."""
+    stale = tmp_path / "data.bt-staging-999"
+    stale.mkdir()
+    (stale / "x.txt").write_text("x", encoding="utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "x.txt").write_text("x", encoding="utf-8")
+
+    def boom(path):
+        raise OSError("nope")
+
+    monkeypatch.setattr(fsops, "remove_path", boom)
+    fsops.reclaim_staging_residue(tmp_path / "data", verified_against=target)
+    assert stale.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="chmod-based permission test is ineffective as root")
+def test_reclaim_quarantine_failure_is_logged(tmp_path: Path):
+    """A failing quarantine (os.replace) is logged, never raised."""
+    stale = tmp_path / "data.bt-staging-999"
+    stale.mkdir()
+    (stale / "x.txt").write_text("x", encoding="utf-8")
+    os.chmod(tmp_path, 0o500)  # not writable -> os.replace fails
+    try:
+        fsops.reclaim_staging_residue(tmp_path / "data")  # must not raise
+    finally:
+        os.chmod(tmp_path, 0o700)
+    assert stale.exists()
 
 
 def test_reclaim_staging_residue_survives_remove_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A failing remove during reclaim is logged, never raised."""
     stale = tmp_path / "data.bt-staging-999"
-    stale.mkdir()
+    stale.write_text("x", encoding="utf-8")  # a file residue goes through remove_path
 
     def boom(path):
         raise OSError("permission denied")

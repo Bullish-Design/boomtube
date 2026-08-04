@@ -39,6 +39,36 @@ def tree_snapshot(root: Path) -> dict[str, tuple[str, bytes | None, str | None]]
     return out
 
 
+def test_empty_link_rejected():
+    with pytest.raises(ValidationError):
+        LinkSpec(link="", target="/x")
+
+
+def test_tilde_link_rejected():
+    """A ~ link would escape the project root via home expansion; rejected."""
+    with pytest.raises(ValidationError):
+        LinkSpec(link="~/.x", target="/x")
+
+
+def test_empty_links_list_rejected():
+    with pytest.raises(ValidationError):
+        BoomtubeConfig(version=1, vars={}, links=[])
+
+
+def test_recheck_geometry_root_and_overlap_refusals(tmp_path: Path):
+    """I2: recheck_geometry refuses root/ancestor links, root targets and overlap."""
+    from boomtube.planning import recheck_geometry
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    with pytest.raises(PlanError):
+        recheck_geometry(root, root, tmp_path / "t", "x")  # link == project root
+    with pytest.raises(PlanError):
+        recheck_geometry(root, root / "x", root, "x")  # target == project root
+    with pytest.raises(PlanError):
+        recheck_geometry(root, root / "d", root / "d" / "inner", "x")  # target inside link
+
+
 # --- I1 geometry: link escaping / root (F3, F4) -----------------------------
 
 @pytest.mark.parametrize(
@@ -257,27 +287,25 @@ def test_apply_all_rejects_dotdot_link_before_mutation(tmp_path: Path):
     assert tree_snapshot(root) == before
 
 
-def test_apply_time_recheck_catches_symlink_parent_created_mid_run(tmp_path: Path):
-    """I2: a parent that becomes a symlink through an earlier link in the same run is
-    caught at apply time as a per-link error; nothing escapes the project root."""
-    from boomtube.apply import apply_all
+def test_apply_time_recheck_catches_symlink_parent(tmp_path: Path):
+    """I2: recheck_geometry re-verifies against the live filesystem at apply time.
 
-    root = tmp_path
-    proj = root / "proj"
-    proj.mkdir()
-    outside = root / "outside"
+    Pairwise preflight (F5) now rejects nested configs up front, so this
+    defense-in-depth path is exercised directly: a parent that has become a
+    symlink (here: by a prior run or an external tool) is caught before the
+    link escapes the project root.
+    """
+    from boomtube.planning import recheck_geometry
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "precious.txt").write_text("keep", encoding="utf-8")
+    (root / "a").symlink_to(outside, target_is_directory=True)  # parent became a symlink
 
-    specs = [
-        LinkSpec(link="a", target=str(outside), kind="dir", migrate=False),
-        LinkSpec(link="a/b", target=str(root / "t2"), kind="dir", migrate=False),
-    ]
-    result = apply_all(proj, specs, ctx_for(proj))
-    assert len(result.applied) == 1
-    assert len(result.failed) == 1
-    assert isinstance(result.failed[0][1], PlanError)
+    with pytest.raises(PlanError):
+        recheck_geometry(root, root / "a" / "b", tmp_path / "t2", "a/b")
     # nothing was created outside the project
-    assert (proj / "a").is_symlink()
     assert not (outside / "b").exists()
     assert (outside / "precious.txt").read_text(encoding="utf-8") == "keep"

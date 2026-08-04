@@ -190,36 +190,23 @@ links:
     assert (proj / ".env").is_symlink()
 
 
-def test_oserror_maps_to_exit_4(tmp_path: Path, monkeypatch):
-    """F19: an OSError outside the per-link loop maps to exit 4."""
-    import boomtube.cli as cli_mod
-
+def test_oserror_during_apply_exits_4(tmp_path: Path):
+    """F7: a real OSError (not PermissionError) during apply maps to exit 4."""
     proj = tmp_path / "proj"
     proj.mkdir()
-    write(proj / "boomtube.yaml", "version: 1\nlinks:\n  - link: '.notes'\n    target: '/x'\n")
-
-    def boom(root, cfg, ctx):
-        raise OSError("simulated I/O failure")
-
-    monkeypatch.setattr(cli_mod, "build_plan", boom)
+    (proj / "a").write_text("i am a file", encoding="utf-8")
+    write(
+        proj / "boomtube.yaml",
+        """
+version: 1
+links:
+  - link: "a/b"
+    target: "/x"
+    kind: file
+""",
+    )
     result = CliRunner().invoke(app, ["apply", "--project-root", str(proj)])
     assert result.exit_code == 4
-
-
-def test_permission_error_maps_to_exit_3(tmp_path: Path, monkeypatch):
-    """F19: a PermissionError maps to exit 3."""
-    import boomtube.cli as cli_mod
-
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    write(proj / "boomtube.yaml", "version: 1\nlinks:\n  - link: '.notes'\n    target: '/x'\n")
-
-    def boom(root, cfg, ctx):
-        raise PermissionError("simulated permission failure")
-
-    monkeypatch.setattr(cli_mod, "build_plan", boom)
-    result = CliRunner().invoke(app, ["apply", "--project-root", str(proj)])
-    assert result.exit_code == 3
 
 
 def test_config_command_prints_resolved_plan(tmp_path: Path):

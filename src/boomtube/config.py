@@ -18,6 +18,8 @@ def load_config(config_path: Path) -> BoomtubeConfig:
         raw_text = config_path.read_text(encoding="utf-8")
     except FileNotFoundError as e:
         raise ConfigError(f"Config not found: {config_path}") from e
+    except PermissionError:
+        raise  # a real permission problem — the CLI maps it to exit 3 (F7)
     except OSError as e:
         raise ConfigError(f"Unable to read config: {config_path}: {e}") from e
 

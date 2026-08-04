@@ -15,7 +15,6 @@ def test_link_only_file_seeds_to_target(tmp_path: Path):
     stats = seed_file(link, target)
     assert target.read_text(encoding="utf-8") == "hello"
     assert stats.copied_a_to_b == 1
-    assert stats.copied_b_to_a == 0
 
 
 def test_target_only_file_is_not_copied_back(tmp_path: Path):

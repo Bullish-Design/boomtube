@@ -1,0 +1,17 @@
+# 002 "manifest safety" — Decision Log
+
+Decisions taken while implementing `refactoring-plan.md`. Each entry cites the
+plan's open-decision (§3) or ambiguous point it resolves.
+
+| # | Decision | Choice | Rationale |
+|---|----------|--------|-----------|
+| D1 | F14 / Step 2g `--force` sweep scope | **(b) scope to colliding rels** | Plan's stated preference ("far less alarming", "what a user reading 'conflict file' expects"). Non-colliding target files stay in place; the merged tree is a union. Existing tests asserting sweep-all behavior are rewritten (test_apply_symlink.py::test_both_populated_force_preserves_target_as_conflict, test_migrate_dirs.py::test_force_sweeps_target_aside_and_seeds, etc.). |
+| D2 | F13 / Step 5 dangling symlinks | **warn at end of run, exit 0** | Plan's proposal. Auto-creating an empty file masks config typos; failing the link breaks `.env.local`-style legitimate dangling links. |
+| D3 | Step 2a special files | **refuse** | Plan's proposal. Silently deleting a FIFO is indefensible; copying one is meaningless. |
+| D4 | Manifest home | **new module `src/boomtube/manifest.py`** (self-contained, stdlib-only) | `reclaim_staging_residue` (fsops) needs the coverage predicate and `scan_tree`; migrate.py already imports fsops. A `manifest.py` that owns lstat classification and is imported by both avoids the `fsops ⇄ migrate` import cycle. `fsops.sniff_type` re-exports from manifest. |
+| D5 | Step 4 reclaim of file/symlink residue | **unconditional removal for symlink/file residue** (as plan pseudocode) | `.bt-tmp-*` is always a temp symlink (never data); `.bt-staging-*` symlinks are never produced by rename_aside (apply takes the symlink branch first); `.bt-staging-*` files only exist when seeding already completed + verified (crash is at rename_aside, which runs only after seed+verify). migrate:false passes `verified_against=None` so dir residue is always quarantined; file residue in that path is removed because the file itself was *explicitly* not-to-be-migrated content under an explicit `--force`. |
+| D6 | NUL in rendered target | **defensive PlanError in build_plan after rendering** (in addition to model validators) | Model validators only see the raw template; a NUL injected via a `{var}` would otherwise hit `Path()` and raise an uncaught ValueError (traceback) instead of exit 2. |
+| D7 | Step 6 pairwise validation vs existing test | `test_apply_time_recheck_catches_symlink_parent_created_mid_run` rewritten | Its two links `a` and `a/b` are *nested links* — exactly what Step 6 now rejects at preflight. The apply-time recheck is still covered by its own unit path; the nested-link fixture moves to the pairwise-rejection tests. |
+| D8 | 11c bare `pytest` | **keep `uv run` house pattern**; README documents `devenv shell -- uv run pytest` | Matches the repo's other projects; no enterShell PATH surgery. |
+| D9 | Step 2e verifier size source | **verify against the manifest's recorded `e.size`**, not a re-stat of the link source | The copy was made from the scanned content; re-stat'ing `src` would spuriously fail if the source changes between scan and verify. The coverage predicate reuses the same `entry_problem`. |
+| D10 | E2 / Step 11b `uv.lock` | **commit it** (remove `.gitignore:12`) | The plan's recommendation: with uv owning the venv, the lock is the reproducibility guarantee; the file's own boilerplate recommends it. `git add -f` not needed once the ignore line is removed. |

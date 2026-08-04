@@ -4,13 +4,15 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Kind = Literal["auto", "file", "dir"]
 
 
 class LinkSpec(BaseModel):
     """One symlink specification."""
+
+    model_config = ConfigDict(extra="forbid")  # a typo like `migrat:` must be rejected (F9)
 
     name: str | None = None
     link: str
@@ -39,6 +41,8 @@ class LinkSpec(BaseModel):
         components = [c for c in re.split(r"[/\\]+", stripped) if c not in ("", ".")]
         if ".." in components:
             raise ValueError("link must not contain '..' components (it must stay inside the project root)")
+        if "\0" in v:
+            raise ValueError("link must not contain NUL bytes")
         return v
 
     @field_validator("target")
@@ -46,17 +50,14 @@ class LinkSpec(BaseModel):
     def target_must_be_non_empty(cls, v: str) -> str:
         if v.strip() == "":
             raise ValueError("target must be non-empty")
-        return v
-
-    @field_validator("kind")
-    @classmethod
-    def kind_allowed(cls, v: str) -> str:
-        if v not in {"auto", "file", "dir"}:
-            raise ValueError("kind must be one of: auto, file, dir")
+        if "\0" in v:
+            raise ValueError("target must not contain NUL bytes")
         return v
 
 
 class BoomtubeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # unknown top-level keys must be rejected (F9)
+
     version: int
     vars: dict[str, str] = Field(default_factory=dict)
     links: list[LinkSpec]

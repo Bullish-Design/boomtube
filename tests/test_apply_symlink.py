@@ -85,7 +85,9 @@ def test_target_is_never_deleted_on_replace(tmp_path: Path):
 
 
 def test_both_populated_force_preserves_target_as_conflict(tmp_path: Path):
-    """D2 --force: target content is preserved as a conflict file, then link seeds."""
+    """D2 --force: colliding target content is preserved as a conflict file, then link seeds.
+
+    F14 decision (b): the non-colliding target file stays in place (union)."""
     project = tmp_path / "proj"
     project.mkdir()
     target = tmp_path / "ext" / "notes"
@@ -103,9 +105,9 @@ def test_both_populated_force_preserves_target_as_conflict(tmp_path: Path):
 
     assert result.failed == []
     assert (project / ".notes").is_symlink()
-    # link content is authoritative at the target; old target content preserved
+    # link content is authoritative at the target
     assert (target / "a.txt").read_text(encoding="utf-8") == "a"
-    conflicts = list(target.glob("keep.txt.conflict-from-project-*"))
-    assert len(conflicts) == 1
-    assert conflicts[0].read_text(encoding="utf-8") == "hi"
     assert (project / ".notes" / "a.txt").read_text(encoding="utf-8") == "a"
+    # F14 (b): the non-colliding target file stays in place — no conflict file
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "hi"
+    assert not list(target.glob("keep.txt.conflict-from-project-*"))

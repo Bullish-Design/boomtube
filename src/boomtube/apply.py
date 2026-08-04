@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -15,13 +16,14 @@ from .fsops import (
     rename_aside,
     sniff_type,
 )
+from .manifest import Manifest, classify, entry_problem
 from .migrate import (
     CopyVerificationError,
     MigrateCollisionError,
+    UnsupportedLinkTypeError,
     has_real_content,
     seed_dir,
     seed_file,
-    snapshot_files,
 )
 from .models import BoomtubeConfig, LinkSpec
 from .planning import PlannedLink, build_plan, recheck_geometry
@@ -37,23 +39,21 @@ class MigrateDisabledError(RuntimeError):
     """`migrate: false` with real content at the link path, without `--force` (F2/I8)."""
 
 
-class UnsupportedLinkTypeError(RuntimeError):
-    """The link path holds a special file (FIFO/socket/device) (F20)."""
-
-
-def detect_kind(spec: LinkSpec, link_path: Path, target_path: Path) -> str:
+def detect_kind(spec: LinkSpec, link_path: Path, target_path: Path, *, consult_link: bool = True) -> str:
     """Detect kind "file" vs "dir" using MVP rules."""
     if spec.kind in {"file", "dir"}:
         return spec.kind
 
-    if link_path.exists():
+    if consult_link and link_path.exists():
         return "dir" if link_path.is_dir() else "file"
     if target_path.exists():
         return "dir" if target_path.is_dir() else "file"
 
-    # Fallback heuristic: dot-folder with no suffix -> dir, else file
+    # Fallback heuristic: dot-folder with no suffix -> dir, else file. Tested
+    # on the BASENAME, not the whole link string (F10: `config/.nvim` is a dir
+    # just like `.nvim`).
     p = Path(spec.link)
-    if spec.link.startswith(".") and p.suffix == "":
+    if p.name.startswith(".") and p.suffix == "":
         return "dir"
     return "file"
 
@@ -85,32 +85,34 @@ def _ensure_target(kind: str, target_path: Path) -> None:
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _verify_snapshot_copied(link_snap: dict[str, Path], target_dir: Path, display: str) -> None:
-    """I5: every still-existing pre-seed link file must have a size-verified copy in target."""
-    for rel in sorted(link_snap):
-        src = link_snap[rel]
-        try:
-            src.stat()
-        except FileNotFoundError:
+def _verify_manifest_migrated(link_mf: Manifest, target_dir: Path, display: str) -> None:
+    """Every still-existing link entry must have a verified copy in the target.
+
+    lstat-based throughout: a target-side symlink never satisfies a file or dir
+    entry (F12 — the old ``dst.is_file()`` followed symlinks). Sources that
+    vanished mid-run are skipped (F11).
+    """
+    for rel in sorted(link_mf.entries):
+        e = link_mf.entries[rel]
+        src = link_mf.root / rel
+        if classify(src) == "missing":
             continue  # vanished mid-run (F11): nothing left to preserve
-        dst = target_dir / rel
-        try:
-            if not dst.is_file() or dst.stat().st_size != src.stat().st_size:
-                raise CopyVerificationError(
-                    f"verify failed for '{display}': no size-verified copy of {src} at {dst}"
-                )
-        except FileNotFoundError:
-            raise CopyVerificationError(
-                f"verify failed for '{display}': missing copy of {src} at {dst}"
-            ) from None
+        problem = entry_problem(e, target_dir / rel)
+        if problem is not None:
+            raise CopyVerificationError(f"verify failed for '{display}': {problem}")
 
 
-def _swap(project_root: Path, link_path: Path, target_path: Path, display: str) -> None:
-    """I6 atomic swap: rename the old path aside, install the symlink, delete the old tree."""
+def _swap(
+    project_root: Path, link_path: Path, target_path: Path, display: str, *, verified_against: Path | None = None
+) -> None:
+    """I6 atomic swap: rename the old path aside, install the symlink, delete the old tree.
+
+    `verified_against` (the target) lets residue reclamation prove a stale
+    staging tree is redundant before deleting it (F3).
+    """
     if _is_root_or_ancestor(link_path, project_root):
         raise RuntimeError(f"refusing to replace project root/ancestor at {link_path}")
-    reclaim_staging_residue(link_path)
-    staging = rename_aside(link_path)
+    staging = rename_aside(link_path, verified_against=verified_against)
     try:
         atomic_symlink(link_path, target_path)
     except Exception:
@@ -137,7 +139,10 @@ def apply_link(project_root: Path, pl: PlannedLink, *, force: bool = False) -> N
     ensure_parent_dir(link_path)
     recheck_geometry(project_root, raw_link, target_path, display)
 
-    reclaim_staging_residue(link_path)
+    # Crash residue is only provably redundant when a migration seeded the
+    # target (F3). The `migrate: false` path never seeds, so its residue must
+    # always be quarantined, never auto-deleted.
+    reclaim_staging_residue(link_path, verified_against=target_path if spec.migrate else None)
 
     link_type = sniff_type(link_path)
 
@@ -149,11 +154,24 @@ def apply_link(project_root: Path, pl: PlannedLink, *, force: bool = False) -> N
         return
 
     if link_type == "symlink":
+        # F4: repointing an existing symlink (e.g. editing `target:` in the
+        # config) must create the new target. `consult_link=False` matters:
+        # `link_path.exists()` follows the symlink, so for a dangling link it
+        # returns False and for a live one it reports the *target's* type —
+        # neither is what we want when deciding what to create.
+        kind = detect_kind(spec, link_path, target_path, consult_link=False)
+        _ensure_target(kind, target_path)
         if _same_target(link_path, target_path):
             logger.info("ok (already correct): %s", display)
-        else:
-            atomic_symlink(link_path, target_path)
-            logger.info("replaced symlink: %s -> %s", link_path, target_path)
+            return
+        previous = None
+        with contextlib.suppress(OSError):
+            previous = readlink_abs(link_path)
+        atomic_symlink(link_path, target_path)
+        logger.warning(
+            "repointed '%s': %s -> %s; the previous target was left untouched and is not migrated",
+            display, previous, target_path,
+        )
         return
 
     if link_type == "special":
@@ -175,7 +193,7 @@ def apply_link(project_root: Path, pl: PlannedLink, *, force: bool = False) -> N
                 "pass --force to replace it without migrating"
             )
         _ensure_target("dir" if link_type == "dir" else "file", target_path)
-        _swap(project_root, link_path, target_path, display)
+        _swap(project_root, link_path, target_path, display)  # nothing was seeded -> no verified_against
         return
 
     # migrate: true — one-directional seed (D1) with both-populated refusal (D2).
@@ -186,15 +204,14 @@ def apply_link(project_root: Path, pl: PlannedLink, *, force: bool = False) -> N
     if link_type == "file":
         stats = seed_file(link_path, target_path, force=force)
     else:
-        link_snap = snapshot_files(link_path)
-        stats = seed_dir(link_path, target_path, force=force)
-        _verify_snapshot_copied(link_snap, target_path, display)
+        stats, link_mf = seed_dir(link_path, target_path, force=force)
+        _verify_manifest_migrated(link_mf, target_path, display)
 
     if stats.conflicts:
         logger.warning("migration conflicts for %s: %d conflict file(s)", display, stats.conflicts)
     logger.info("migrated %s (link->target: %d)", display, stats.copied_a_to_b)
 
-    _swap(project_root, link_path, target_path, display)
+    _swap(project_root, link_path, target_path, display, verified_against=target_path)
 
 
 @dataclass
@@ -231,4 +248,13 @@ def apply_plan(project_root: Path, planned: Sequence[PlannedLink], *, force: boo
         except Exception as e:
             result.failed.append((pl.link_path, e))
             logger.error("failed to apply link '%s': %s", display, e)
+    # F13: a dangling file symlink is legitimate (.env.local-style links the
+    # user is about to populate); report it once instead of failing.
+    dangling = [p for p in result.applied if p.is_symlink() and not p.exists()]
+    if dangling:
+        logger.warning(
+            "%d symlink(s) point at paths that do not exist yet: %s",
+            len(dangling),
+            ", ".join(str(p) for p in dangling[:5]),
+        )
     return result

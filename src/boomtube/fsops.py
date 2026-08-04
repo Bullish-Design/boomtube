@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import shutil
-import stat
 from pathlib import Path
 
+from .manifest import classify, scan_tree, uncovered_rels
 from .util import unique_path
 
 logger = logging.getLogger(__name__)
@@ -43,33 +44,57 @@ def sniff_type(path: Path) -> str:
     itself). Other OSErrors (e.g. permission denied on a parent) propagate so
     they surface as per-link failures rather than being misread as ``missing``.
     """
-    try:
-        st = path.lstat()
-    except FileNotFoundError:
-        return "missing"
-    if stat.S_ISLNK(st.st_mode):
-        return "symlink"
-    if stat.S_ISDIR(st.st_mode):
-        return "dir"
-    if stat.S_ISREG(st.st_mode):
-        return "file"
-    return "special"
+    return classify(path)
 
 
-def reclaim_staging_residue(path: Path) -> None:
-    """Remove stale ``<name>.bt-staging-*`` / ``<name>.bt-tmp-*`` crash residue.
+def reclaim_staging_residue(path: Path, *, verified_against: Path | None = None) -> None:
+    """Reclaim ``<name>.bt-staging-*`` / ``<name>.bt-tmp-*`` crash residue.
 
-    Safe: the atomic swap only renames the link tree aside after every file in
-    the pre-seed snapshot has a size-verified copy in the target, so a stale
-    staging tree is always redundant (its content already lives in the target).
+    A staging tree is only redundant if its contents are provably present in
+    the target (`verified_against`). Anything unverifiable is quarantined as
+    ``<name>.bt-orphan-*``, which is deliberately NOT matched by these globs,
+    so it is never auto-deleted (F3). ``<name>`` is glob-escaped so a link
+    named e.g. ``[mn]`` cannot touch a sibling's residue (F6). Never raises:
+    failures are logged.
     """
-    for pattern in (f"{path.name}.bt-staging-*", f"{path.name}.bt-tmp-*"):
-        for stale in path.parent.glob(pattern):
+    for suffix in (".bt-staging-*", ".bt-tmp-*"):
+        for stale in path.parent.glob(glob.escape(path.name) + suffix):
+            if stale.is_symlink() or stale.is_file():
+                # Temp symlinks (atomic_symlink) are never data; a staging
+                # *file* only exists after its seed+verify completed, so it is
+                # always redundant (D5).
+                try:
+                    remove_path(stale)
+                    logger.debug("reclaimed stale staging residue: %s", stale)
+                except OSError as e:
+                    logger.warning("failed to reclaim stale staging residue %s: %s", stale, e)
+                continue
+            if verified_against is not None and _tree_is_covered_by(stale, verified_against):
+                try:
+                    remove_path(stale)
+                    logger.debug("reclaimed verified stale staging residue: %s", stale)
+                except OSError as e:
+                    logger.warning("failed to reclaim stale staging residue %s: %s", stale, e)
+                continue
+            orphan = unique_path(stale.with_name(f"{path.name}.bt-orphan"))
             try:
-                remove_path(stale)
-                logger.debug("reclaimed stale staging residue: %s", stale)
+                os.replace(stale, orphan)
             except OSError as e:
-                logger.warning("failed to reclaim stale staging residue %s: %s", stale, e)
+                logger.warning("failed to quarantine stale staging residue %s: %s", stale, e)
+                continue
+            logger.warning(
+                "preserved unverified crash residue as %s — inspect and remove manually", orphan
+            )
+
+
+def _tree_is_covered_by(stale: Path, target_dir: Path) -> bool:
+    """True if every entry of the stale tree has a verified copy under `target_dir`.
+
+    The stale tree is scanned fresh (lstat-based, never following symlinks); a
+    tree is only redundant if nothing in it is missing from the target.
+    """
+    mf = scan_tree(stale, exclude_conflicts=False)
+    return not uncovered_rels(mf, target_dir)
 
 
 def atomic_symlink(link: Path, target: Path) -> None:
@@ -86,17 +111,18 @@ def atomic_symlink(link: Path, target: Path) -> None:
     finally:
         try:
             tmp.unlink()
-        except FileNotFoundError:
-            pass
+        except OSError:
+            pass  # a PermissionError here must not mask the real exception (F16)
 
 
-def rename_aside(path: Path) -> Path:
+def rename_aside(path: Path, *, verified_against: Path | None = None) -> Path:
     """Atomically move `path` aside to ``<name>.bt-staging-<pid>``; return staging path.
 
     Same-filesystem ``os.replace`` move; the old tree survives any crash point
-    and is deleted by the caller only after the new symlink exists (I6).
+    and is deleted by the caller only after the new symlink exists (I6). Stale
+    residue is reclaimed first, verified against the target when provided.
     """
-    reclaim_staging_residue(path)
+    reclaim_staging_residue(path, verified_against=verified_against)
     staging = unique_path(path.with_name(f"{path.name}.bt-staging-{os.getpid()}"))
     os.replace(path, staging)
     return staging
