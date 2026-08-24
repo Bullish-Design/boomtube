@@ -16,6 +16,26 @@
         "type": "github"
       }
     },
+    "devman": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1787582917,
+        "narHash": "sha256-V304PmSZW/GwTLuJgcLLdws3Qg0DVdsCZMlIIdMUpPk=",
+        "ref": "main",
+        "rev": "f20a9c11cd6b062aa6646e8b72b9767d7e90a522",
+        "revCount": 275,
+        "type": "git",
+        "url": "https://github.com/Bullish-Design/devman"
+      },
+      "original": {
+        "ref": "main",
+        "rev": "f20a9c11cd6b062aa6646e8b72b9767d7e90a522",
+        "type": "git",
+        "url": "https://github.com/Bullish-Design/devman"
+      }
+    },
     "flake-compat": {
       "flake": false,
       "locked": {
@@ -28,6 +48,27 @@
       "original": {
         "owner": "edolstra",
         "repo": "flake-compat",
+        "type": "github"
+      }
+    },
+    "home-manager": {
+      "inputs": {
+        "nixpkgs": [
+          "shellij",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1784123766,
+        "narHash": "sha256-PZcuvieLhy1OaX5LQr4kZgO59x/7rS47vWSqOXiBhts=",
+        "owner": "nix-community",
+        "repo": "home-manager",
+        "rev": "6dc9e081ba2afc8c3b81ccddcb895f786155b292",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "home-manager",
         "type": "github"
       }
     },
@@ -47,7 +88,7 @@
     },
     "nix2container": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs_2"
       },
       "locked": {
         "lastModified": 1767430085,
@@ -64,14 +105,16 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1768857646,
+        "lastModified": 1787135253,
+        "narHash": "sha256-RD2kNWCG+Bjo6h+JVjWVNntZs2GtRoeY2xHjts/FNkA=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "a83d72e66f7b6b32647985f848f61600d00c3d39",
+        "rev": "ffb3c9b700e759be2ef13237c9d8f953b32a1e46",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
+        "ref": "nixos-unstable",
         "repo": "nixpkgs",
         "type": "github"
       }
@@ -79,7 +122,7 @@
     "nixpkgs-python": {
       "inputs": {
         "flake-compat": "flake-compat",
-        "nixpkgs": "nixpkgs_3"
+        "nixpkgs": "nixpkgs_4"
       },
       "locked": {
         "lastModified": 1765052656,
@@ -96,6 +139,20 @@
     },
     "nixpkgs_2": {
       "locked": {
+        "lastModified": 1768857646,
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "a83d72e66f7b6b32647985f848f61600d00c3d39",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_3": {
+      "locked": {
         "lastModified": 1767052823,
         "owner": "cachix",
         "repo": "devenv-nixpkgs",
@@ -109,7 +166,7 @@
         "type": "github"
       }
     },
-    "nixpkgs_3": {
+    "nixpkgs_4": {
       "locked": {
         "lastModified": 1767313136,
         "owner": "NixOS",
@@ -124,13 +181,45 @@
         "type": "github"
       }
     },
+    "nixpkgs_5": {
+      "locked": {
+        "lastModified": 1784007870,
+        "narHash": "sha256-djcLt/JJphyNt4eDY9XTly+/WbCK5lqWq9lSgCmJkkQ=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "18b9261cb3294b6d2a06d03f96872827b8fe2698",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "devenv": "devenv",
+        "devman": "devman",
         "mk-shell-bin": "mk-shell-bin",
         "nix2container": "nix2container",
-        "nixpkgs": "nixpkgs_2",
-        "nixpkgs-python": "nixpkgs-python"
+        "nixpkgs": "nixpkgs_3",
+        "nixpkgs-python": "nixpkgs-python",
+        "shellij": "shellij"
+      }
+    },
+    "shellij": {
+      "inputs": {
+        "home-manager": "home-manager",
+        "nixpkgs": "nixpkgs_5"
+      },
+      "locked": {
+        "path": "/home/andrew/Documents/Projects/shellij",
+        "type": "path"
+      },
+      "original": {
+        "path": "/home/andrew/Documents/Projects/shellij",
+        "type": "path"
       }
     }
   },

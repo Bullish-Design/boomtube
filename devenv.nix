@@ -46,6 +46,31 @@
     echo hello from $GREET
   '';
 
+  # devman — the automation plane (CONCEPT.md §5). `base` alone: this repository
+  # ships no scheduled work and writes none of its own files.
+  devman = {
+    enable = true;
+    project = "boomtube";
+    groups = [ "base" ];
+  };
+
+  # https://devenv.sh/tasks/
+  #
+  # The two task names the `base` group calls (groups/base/README.md). devenv
+  # owns each implementation; Dagu owns the composition (§6).
+  #
+  # `pytest` lives in `[project.optional-dependencies].dev`, which devenv's venv
+  # does not install — hence `uv run --extra dev` (STAGE_7_LOG.md, wave 2b).
+  # `ruff check src` matches the repo's own `src = ["src"]` scope; the full
+  # tree carries 241 findings in `.scratch/` repros, which are not source.
+  tasks = {
+    "boomtube:lint".exec = "uv run --extra dev ruff check src";
+    "boomtube:test".exec = "uv run --extra dev pytest";
+
+    "base:check".after = [ "boomtube:lint" ];
+    "base:test".after = [ "boomtube:test" ];
+  };
+
   enterShell = ''
     hello
     git --version
